@@ -32,8 +32,8 @@ const client = new Client({
   }
 });
 const FormData = require('form-data');
-const axios = require('axios');
 const Tesseract = require('tesseract.js');
+const axios = require('axios');
 const fs = require('fs');
 const qrcode = require('qrcode-terminal');
 const readXlsxFile = require('read-excel-file/node');
@@ -578,138 +578,116 @@ const waitForReply = async (originalMessage) => {
 
 const handlePlanChange = async (message) => {
     const chat = await message.getChat();
-    const cookies = await getCookies();
-    
-    await chat.sendMessage("Username:");
-    const usernameMessage = await waitForReply(message);
-    const usernameToSearch = usernameMessage.body.trim();
-    if (!usernameToSearch) return await chat.sendMessage("Username cannot be empty.");
+    const messageBody = message.body; // Use original case for usernames
 
-    await chat.sendMessage("Package ID:");
-    const pkgIdMessage = await waitForReply(message);
-    const desiredPkgId = pkgIdMessage.body.trim();
-    if (!desiredPkgId) return await chat.sendMessage("Package ID cannot be empty.");
+    // 1. Define patterns for usernames, subscriber IDs (for checking), and package IDs
+    const usernamePattern = /jh[\.\w]+/gi;
+    const subscriberIdPattern = /\b\d{5,}\b/g; // To detect if user sent a subscriber ID
+    const packageIdPattern = /\b\d{3,6}\b/g;   // Package IDs can be 3 to 6 digits
+
+    // 2. Extract all potential matches
+    const usernames = messageBody.match(usernamePattern) || [];
+    const subscriberIds = messageBody.match(subscriberIdPattern) || [];
+    const potentialPackageIds = messageBody.match(packageIdPattern) || [];
+
+    // 3. Validate the input with clear rules
+    // Rule 1: If a subscriber ID is found BUT no username is found, it's an invalid request.
+    if (usernames.length === 0 && subscriberIds.length > 0) {
+        return await chat.sendMessage("❌ Please provide a username (e.g., jh.xyz.name) for plan changes, not a subscriber ID.");
+    }
     
+    // Rule 2: If no usernames are found at all, the request is invalid.
+    if (usernames.length === 0) {
+        return await chat.sendMessage("❌ Username not found in the message. Please provide at least one username.");
+    }
+
+    // Rule 3: There must be exactly one package ID.
+    if (potentialPackageIds.length === 0) {
+        return await chat.sendMessage("❌ Please provide a 3 to 6-digit Package ID in your message.");
+    }
+    if (potentialPackageIds.length > 1) {
+        return await chat.sendMessage("❌ Please provide only one Package ID at a time to apply to all users.");
+    }
+
+    const desiredPkgId = potentialPackageIds[0];
+    await chat.sendMessage(`⏳ Processing plan change for ${usernames.length} user(s) to Package ID: *${desiredPkgId}*...`);
+
+    const cookies = await getCookies();
+    if (!cookies) {
+        return await chat.sendMessage("Authentication failed. Cannot proceed with plan change.");
+    }
     const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
 
-    const payload = new URLSearchParams({
-        'railwire_test_name': cookies.railwireCookie.value,
-        'user-search': usernameToSearch
-    });
-
-    const searchResponse = await axios.post(
-        'https://jh.railwire.co.in/billcntl/searchsub ',
-        payload.toString(),
-        {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': cookieString,
-            },
-            maxRedirects: 0,
-            validateStatus: status => status >= 200 && status < 400
-        }
-    );
-
-    const redirectUrl = searchResponse.headers.location;
-    const finalUrl = redirectUrl.startsWith('http')
-        ? redirectUrl
-        : `https://jh.railwire.co.in${redirectUrl}`;
-
-    const tableResponse = await axios.get(finalUrl, {
-        headers: {
-            'Cookie': cookieString,
-        }
-    });
-
-    const $ = cheerio.load(tableResponse.data);
-    
-    const users = [];
-    $('table.table-striped tbody tr').each(function() {
-        const row = $(this);
-        const id = row.find('td:nth-child(1)').text().trim();
-        const usernameCell = row.find('td:nth-child(2)');
-        const username = usernameCell.find('a').text().trim();
-        const lastLogin = row.find('td:nth-child(4)').text().trim();
-        const nextRenewal = row.find('td:nth-child(5)').text().trim();
-        const mobile = row.find('td:nth-child(6)').text().trim();
-        const link = usernameCell.find('a').attr('href');
-        
-        if (username && link) {
-            users.push({
-                id,
-                username,
-                lastLogin,
-                nextRenewal,
-                mobile,
-                link
+    // 4. Loop through each VALIDATED username and process the plan change
+    for (const username of usernames) {
+        try {
+            const payload = new URLSearchParams({
+                'railwire_test_name': cookies.railwireCookie.value,
+                'user-search': username
             });
+
+            const searchResponse = await axios.post(
+                'https://jh.railwire.co.in/billcntl/searchsub ',
+                payload.toString(),
+                {
+                    headers: { 'Content-Type': 'application/x-urlencoded', 'Cookie': cookieString },
+                    maxRedirects: 0,
+                    validateStatus: status => status >= 200 && status < 400
+                }
+            );
+
+            const finalUrl = `https://jh.railwire.co.in${searchResponse.headers.location}`;
+            const tableResponse = await axios.get(finalUrl, { headers: { 'Cookie': cookieString } });
+            const $ = cheerio.load(tableResponse.data);
+
+            const searchResults = [];
+            $('table.table-striped tbody tr').each(function() {
+                const row = $(this);
+                const foundUsername = row.find('td:nth-child(2) a').text().trim();
+                const link = row.find('td:nth-child(2) a').attr('href');
+                if (foundUsername && link) {
+                    searchResults.push({ username: foundUsername, link });
+                }
+            });
+
+            if (searchResults.length === 0) {
+                await chat.sendMessage(`❌ No user found for "${username}". Skipping.`);
+                continue;
+            }
+
+            // Find the exact match. This is crucial for non-interactive flow.
+            const selectedUser = searchResults.find(user => user.username.toLowerCase() === username.toLowerCase());
+
+            if (!selectedUser) {
+                await chat.sendMessage(`❌ No exact match found for "${username}". Found ${searchResults.length} partial matches. Skipping.`);
+                continue;
+            }
+
+            // Proceed with the exact matched user
+            const detailUrl = `https://jh.railwire.co.in${selectedUser.link}`;
+            const detailPage = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
+
+            const $$ = cheerio.load(detailPage.data);
+            const formData = {
+                subid: $$('#subid').val() || '',
+                status: $$('#status').val() || '',
+                oldpkgid: $$('#oldpackageid').val() || '',
+                verifyHidden: $$('#verifyHidden').val() || '',
+                pkgid: desiredPkgId
+            };
+
+            const planChanged = await ChangePlan(formData, selectedUser.username, cookies);
+
+            if (planChanged) {
+                await chat.sendMessage(`✅ Plan changed successfully for *${selectedUser.username}* to Package ID *${desiredPkgId}*!`);
+            } else {
+                await chat.sendMessage(`❌ Failed to change plan for *${selectedUser.username}*. Check package ID and try again.`);
+            }
+
+        } catch (error) {
+            console.error(`Error processing plan change for ${username}:`, error.message);
+            await chat.sendMessage(`❌ An error occurred while processing plan change for *${username}*.`);
         }
-    });
-
-    if (users.length === 0) {
-        await chat.sendMessage(`❌ No users found matching "${usernameToSearch}"`);
-        return;
-    }
-
-    let selectedUser = null;
-
-    // Multiple users found, check for exact match first
-    const exactMatch = users.find(user => user.username.toLowerCase() === usernameToSearch.toLowerCase());
-    
-    if (exactMatch) {
-        selectedUser = exactMatch;
-        await chat.sendMessage(`ID: ${selectedUser.id}\nExact match: ${selectedUser.username}\nProceeding Change..`);
-    } else {
-        // Show all options and let user select
-        let optionsMessage = `Found ${users.length} users matching "${usernameToSearch}":\n\n`;
-        
-        users.forEach((user, index) => {
-            const status = user.lastLogin.includes('No login') ? 'Inactive' : 'Active';
-            const renewalStatus = user.nextRenewal && new Date(user.nextRenewal) < new Date() ? 'Expired' : '';
-            
-            optionsMessage += `${index + 1}. ${status} *${user.username}* (ID: ${user.id})\n`;
-            optionsMessage += `Mobile: ${user.mobile}\n`;
-            optionsMessage += `Renewal: ${user.nextRenewal} ${renewalStatus}\n`;
-            optionsMessage += `Last Login: ${user.lastLogin}\n\n`;
-        });
-        
-        optionsMessage += `Please reply with the no. (1-${users.length}) to select:`;
-        await chat.sendMessage(optionsMessage);
-        
-        const selectionMessage = await waitForReply(message);
-        const selection = parseInt(selectionMessage.body.trim());
-        
-        if (isNaN(selection) || selection < 1 || selection > users.length) {
-            await chat.sendMessage("❌ Invalid selection.");
-            return;
-        }
-        
-        selectedUser = users[selection - 1];
-    }
-
-    // Proceed with the selected user
-    const detailUrl = `https://jh.railwire.co.in${selectedUser.link}`;
-    const detailPage = await axios.get(detailUrl, {
-        headers: {
-            'Cookie': cookieString,
-        }
-    });
-
-    const $$ = cheerio.load(detailPage.data);
-    const formData = {
-        subid: $$('#subid').val() || '',
-        status: $$('#status').val() || '',
-        oldpkgid: $$('#oldpackageid').val() || '',
-        verifyHidden: $$('#verifyHidden').val() || '',
-        pkgid: desiredPkgId
-    };
-
-    const planChanged = await ChangePlan(formData, selectedUser.username, cookies);
-
-    if (planChanged) {
-        await chat.sendMessage(`✅ Plan changed successfully\n\nID: ${selectedUser.username}!\nNew Package ID: ${desiredPkgId}`);
-    } else {
-        await chat.sendMessage(`❌ Failed to change plan for ${selectedUser.username}. Check package ID and try again.`);
     }
 };
 
@@ -1335,62 +1313,69 @@ async function ChangePlan(formData, username, cookies) {
 }
 
 const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsDeactiveID) => {
-    const { userCode, userData } = userSessions.get(userIdentifier);
+    const session = userSessions.get(userIdentifier);
+    // Check for the new 'userCodes' array property
+    if (!session || !session.userCodes || session.userCodes.length === 0) {
+        // If no codes are in session, do nothing.
+        userSessions.delete(userIdentifier);
+        return;
+    }
+
+    const { userCodes } = session;
     const cookies = await getCookies();
     const userDataMap = await loadUserDataFromExcel();
-    let fetchedUserData = userData || userDataMap.get(userCode);
-    
-    if (!fetchedUserData) {
-        fetchedUserData = await fetchUserDataFromPortal(userCode);
-    }
-    
-    if (fetchedUserData) {
-        userSessions.set(userIdentifier, { userCode, userData: fetchedUserData });
+
+    // Loop through each user code stored in the session
+    for (const userCode of userCodes) {
+        let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
         
-        // Initialize results
-        let passwordResetResult = null;
-        let deactivateResult = null;
+        if (fetchedUserData) {
+            // Initialize results for this specific user code
+            let passwordResetResult = null;
+            let deactivateResult = null;
 
-        const maskedName = maskName(toTitleCase(fetchedUserData.Name));
-        const maskedId = maskUsername(userCode); // userCode can be a username OR a subscriber ID
-        let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
+            const maskedName = maskName(toTitleCase(fetchedUserData.Name));
+            const maskedId = maskUsername(userCode);
+            let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
 
-        if (wantsSessionReset) {
-            console.log('Requested Session Cleaning...');
-            const sessionStatus = await resetSession(fetchedUserData, cookies);
+            if (wantsSessionReset) {
+                console.log(`Requested Session Cleaning for ${userCode}...`);
+                const sessionStatus = await resetSession(fetchedUserData, cookies);
 
-            if (sessionStatus === 'SUCCESS') {
-                responseMessage += '\n*Session clear kr diya gya h* ✅';
-            } else if (sessionStatus === 'NOT_ACTIVE') {
-                responseMessage += '\nSession active nhi hai ❌';
-            } else {
-                responseMessage += '\nFailed to reset session ❌';
+                if (sessionStatus === 'SUCCESS') {
+                    responseMessage += '\n*Session clear kr diya gya h* ✅';
+                } else if (sessionStatus === 'NOT_ACTIVE') {
+                    responseMessage += '\nSession active nhi hai ❌';
+                } else {
+                    responseMessage += '\nFailed to reset session ❌';
+                }
             }
-        }
+            
+            if (wantsDeactiveID) {
+                console.log(`Activating Deactivated ID for ${userCode}...`);
+                deactivateResult = await DeactivateID(fetchedUserData, cookies);
+                responseMessage += '\n' + (deactivateResult ? '*Subscriber activated* ✅' : 'Failed to active ❌');
+            }
+
+            if (wantsPasswordReset) {
+                console.log(`Requested Password Resetting for ${userCode}...`);
+                passwordResetResult = await resetPassword(fetchedUserData, cookies);
+                if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) {
+                    responseMessage += '\n*Reset kr diya gya hai* ✅';
+                } else {
+                    console.log('Reset failed due to Server Issue.');
+                    responseMessage += '\nPassword reset failed';
+                }
+            }
         
-        if (wantsDeactiveID) {
-            console.log('Activating Deactivated ID...');
-            deactivateResult = await DeactivateID(fetchedUserData, cookies);
-            responseMessage += '\n' + (deactivateResult ? '*Subscriber activated* ✅' : 'Failed to active ❌');
+            await message.reply(responseMessage);
+        } else {
+            console.log(`No user data found for JH code or ID: ${userCode}`);
+            await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
         }
-
-        if (wantsPasswordReset) {
-            console.log('Requested Password Resetting...');
-            passwordResetResult = await resetPassword(fetchedUserData, cookies);
-            if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) {
-                responseMessage += '\n*Reset kr diya gya hai* ✅';
-            } else {
-                console.log('Reset failed due to Server Issue.');
-                responseMessage += '\nPassword reset failed';
-            }
-        }
-    
-        await message.reply(responseMessage);
-    } else {
-        console.log(`No user data found for JH code or ID: ${userCode}`);
-        await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
     }
 
+    // Delete the session after processing all user codes
     userSessions.delete(userIdentifier);
 };
 
@@ -1811,7 +1796,7 @@ const handleIncomingMessage = async (message) => {
         return;
     }
 
-    if (messageBody === 'planupdate') {
+    if (messageBody.includes('planchange') || messageBody.includes('planupdate')) {
         await handlePlanChange(message);
         return;
     }
@@ -1829,15 +1814,27 @@ const handleIncomingMessage = async (message) => {
         return;
     }
 
-    // Pattern matching for JH codes and subscriber IDs
-    let codePattern = /jh(\.\w+){2,}/i;
-    let codeMatch = messageBody.match(codePattern);
-    let subscriberIdPattern = /\b\d{5}\b/;
-    let subscriberIdMatch = messageBody.match(subscriberIdPattern);
-    let currentUserCodeOrId = codeMatch ? codeMatch[0].toLowerCase() : (subscriberIdMatch ? subscriberIdMatch[0] : null);
+    // Pattern matching for JH codes and subscriber IDs (using global flag 'g' to find all matches)
+    let codePattern = /jh(\.\w+){2,}/gi;
+    let subscriberIdPattern = /\b\d{5,}\b/g;
+    
+    let codeMatches = messageBody.match(codePattern) || [];
+    let subscriberIdMatches = messageBody.match(subscriberIdPattern) || [];
+    
+    let allUserCodes = [...codeMatches, ...subscriberIdMatches].map(code => code.toLowerCase());
 
-    if (currentUserCodeOrId) {
-        userSessions.set(userIdentifier, { userCode: currentUserCodeOrId, userData: null });
+    if (allUserCodes.length > 0) {
+        // Get the existing session for the user, or create a new one if it doesn't exist.
+        const existingSession = userSessions.get(userIdentifier) || { userCodes: [] };
+        
+        // Combine the old user codes with the new ones found in the current message.
+        const combinedUserCodes = [...existingSession.userCodes, ...allUserCodes];
+        
+        // Use a Set to automatically remove any duplicate IDs, then convert back to an array.
+        const uniqueUserCodes = [...new Set(combinedUserCodes)];
+        
+        // Store the updated (accumulated and unique) list of user codes back into the session.
+        userSessions.set(userIdentifier, { userCodes: uniqueUserCodes });
     }
 
     // Check for OTT issues and determine the service provider
@@ -1855,7 +1852,12 @@ const handleIncomingMessage = async (message) => {
 
     // Handle OTT complaint with automatic service detection
     if (serviceProvider && userSessions.has(userIdentifier)) {
-        await processOTTComplaint(message, userIdentifier, serviceProvider);
+        const session = userSessions.get(userIdentifier);
+        if (session.userCodes && session.userCodes.length > 0) {
+             // Temporarily set a single userCode for processOTTComplaint
+            userSessions.set(userIdentifier, { ...session, userCode: session.userCodes[0] });
+            await processOTTComplaint(message, userIdentifier, serviceProvider);
+        }
         return;
     }
 
