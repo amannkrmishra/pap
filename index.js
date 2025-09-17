@@ -1,4 +1,4 @@
-﻿const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const client = new Client({
   authStrategy: new LocalAuth(),
@@ -591,17 +591,12 @@ const handlePlanChange = async (message) => {
     const potentialPackageIds = messageBody.match(packageIdPattern) || [];
 
     // 3. Validate the input with clear rules
-    // Rule 1: If a subscriber ID is found BUT no username is found, it's an invalid request.
     if (usernames.length === 0 && subscriberIds.length > 0) {
-        return await chat.sendMessage("❌ Please provide a username (e.g., jh.xyz.name) for plan changes, not a subscriber ID.");
+        return await chat.sendMessage("❌ Please provide a username (e.g., jh.rcn.name) for plan changes, not a subscriber ID.");
     }
-    
-    // Rule 2: If no usernames are found at all, the request is invalid.
     if (usernames.length === 0) {
         return await chat.sendMessage("❌ Username not found in the message. Please provide at least one username.");
     }
-
-    // Rule 3: There must be exactly one package ID.
     if (potentialPackageIds.length === 0) {
         return await chat.sendMessage("❌ Please provide a 3 to 6-digit Package ID in your message.");
     }
@@ -630,7 +625,10 @@ const handlePlanChange = async (message) => {
                 'https://jh.railwire.co.in/billcntl/searchsub ',
                 payload.toString(),
                 {
-                    headers: { 'Content-Type': 'application/x-urlencoded', 'Cookie': cookieString },
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded', 
+                        'Cookie': cookieString 
+                    },
                     maxRedirects: 0,
                     validateStatus: status => status >= 200 && status < 400
                 }
@@ -655,7 +653,6 @@ const handlePlanChange = async (message) => {
                 continue;
             }
 
-            // Find the exact match. This is crucial for non-interactive flow.
             const selectedUser = searchResults.find(user => user.username.toLowerCase() === username.toLowerCase());
 
             if (!selectedUser) {
@@ -663,7 +660,6 @@ const handlePlanChange = async (message) => {
                 continue;
             }
 
-            // Proceed with the exact matched user
             const detailUrl = `https://jh.railwire.co.in${selectedUser.link}`;
             const detailPage = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
 
