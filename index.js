@@ -1890,7 +1890,7 @@ const handleIncomingMessage = async (message) => {
     if (messageBody === 'subscount') {
     const count = await getSubscriberCount();
     const formattedTime = new Date().toLocaleTimeString('en-US');
-    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscribercount*`;
+    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscount*`;
     await message.reply(replyMessage);
     return;
     }
