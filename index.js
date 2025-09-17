@@ -1,4 +1,4 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+﻿const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const client = new Client({
   authStrategy: new LocalAuth(),
@@ -32,6 +32,7 @@ const client = new Client({
   }
 });
 const FormData = require('form-data');
+const cron = require('node-cron');
 const Tesseract = require('tesseract.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -196,6 +197,42 @@ const loadPartnerMappings = (filename = 'TicketMappingANP.xlsx') => {
     }
 };
 
+const getSubscriberCount = async () => {
+    try {
+        const cookies = await getCookies();
+        if (!cookies) {
+            throw new Error("Authentication failed, cannot get cookies.");
+        }
+
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        
+        // The dashboard URL is /billcntl
+        const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
+
+        const response = await axios.get(dashboardUrl, {
+            headers: { 'Cookie': cookieString }
+        });
+
+        const $ = cheerio.load(response.data);
+
+        // Find the div with the text 'active subscribers', then get the number from the sibling span
+        const subscriberCount = $('.infobox-content:contains("active subscribers")')
+                                  .siblings('.infobox-data-number')
+                                  .text()
+                                  .trim();
+
+        if (subscriberCount) {
+            return subscriberCount;
+        } else {
+            return 'Count not found.';
+        }
+
+    } catch (error) {
+        console.error('Error fetching subscriber count:', error.message);
+        return 'Could not retrieve count.';
+    }
+};
+
 const loadExcelData = () => {
     if (jhCodeMap) return;
 
@@ -254,6 +291,87 @@ const refreshCookies = async () => {
         return null;
     } finally {
         refreshingPromise = null;
+    }
+};
+
+// NEW FEATURE: Handles interactive subscriber detail updates
+const handleSubscriberUpdate = async (message) => {
+    const chat = await message.getChat();
+
+    try {
+        // 1. Ask for Username or Subscriber ID
+        await chat.sendMessage("Enter Username or Subscriber ID:");
+        const idMessage = await waitForReply(message);
+        const userCode = idMessage.body.trim();
+        if (!userCode) {
+            await chat.sendMessage("❌ Canceled. No ID provided.");
+            return;
+        }
+
+        // 2. Fetch user data (Excel first, then live portal as a fallback)
+        await chat.sendMessage(`⏳ Looking up details for "${userCode}"...`);
+        const userDataMap = await loadUserDataFromExcel(); // Load the local Excel cache
+        const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
+
+        // 3. Validate if user was found
+        if (!userData || !userData.SubscriberId) {
+            await chat.sendMessage(`❌ Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
+            return;
+        }
+
+        // 4. Ask for the new Phone Number
+        await chat.sendMessage(`Found: *${userData.Username}*\n\nEnter the new Phone Number:`);
+        const phoneMessage = await waitForReply(message);
+        const newPhoneNumber = phoneMessage.body.trim();
+        if (!/^\d{10}$/.test(newPhoneNumber)) {
+            await chat.sendMessage("❌ Invalid phone number. Please enter a 10-digit number. Operation canceled.");
+            return;
+        }
+
+        // 5. Ask for the new Email Address
+        await chat.sendMessage(`Enter the new Email Address:`);
+        const emailMessage = await waitForReply(message);
+        const newEmail = emailMessage.body.trim().toLowerCase();
+        if (!/\S+@\S+\.\S+/.test(newEmail)) {
+            await chat.sendMessage("❌ Invalid email format. Operation canceled.");
+            return;
+        }
+        
+        // 6. Perform the update via API call
+        await chat.sendMessage(`⏳ Updating details for *${userData.Username}*...`);
+        const cookies = await getCookies();
+        if (!cookies) {
+            await chat.sendMessage("❌ Authentication failed. Cannot proceed.");
+            return;
+        }
+
+        const payload = new URLSearchParams({
+            'cnumber': newPhoneNumber,
+            'cemail': newEmail,
+            'id': userData.SubscriberId, // This uses the numerical ID, which was found in step 2
+            'railwire_test_name': cookies.railwireCookie.value
+        });
+
+        const config = {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        };
+
+        const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+
+        // 7. Confirm the result to the user
+        if (response.data && response.data.STATUS === "OK") {
+            await chat.sendMessage(`✅ Details have been updated successfully for *${userData.Username}*!`);
+        } else {
+            const serverStatus = response.data ? response.data.STATUS : "No response";
+            await chat.sendMessage(`❌ Update failed. Server responded: ${serverStatus}`);
+        }
+
+    } catch (error) {
+        console.error("Error during subscriber update:", error.message);
+        await chat.sendMessage("❌ An unexpected error occurred during the update process.");
     }
 };
 
@@ -1771,10 +1889,22 @@ const handleIncomingMessage = async (message) => {
     console.log(`User Detail: ${userIdentifier}`);
     console.log(`Message: ${messageBody}`);
 
-    // New Direct Search Logic
+    if (messageBody === 'subscount') {
+    const count = await getSubscriberCount();
+    const formattedTime = new Date().toLocaleTimeString('en-US');
+    const replyMessage = `Time: ${formattedTime}\nActive Subscriber: *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscribercount*`;
+    await message.reply(replyMessage);
+    return;
+    }
+
     if (messageBody.startsWith('search ')) {
         const searchTerm = message.body.substring(7).trim();
         await handleSubscriberSearch(message, searchTerm);
+        return;
+    }
+
+    if (messageBody === 'subsupdate') {
+        await handleSubscriberUpdate(message);
         return;
     }
 
@@ -1867,6 +1997,31 @@ client.on('ready', () => {
     loadAllData();
     botStartTime = Date.now();
     console.log('WhatsApp bot ready to use!!');
+    const scheduledTask = async () => {
+        try {
+            const count = await getSubscriberCount();
+            if (!count || count.includes('not found') || count.includes('retrieve')) return;
+
+            const formattedTime = new Date().toLocaleTimeString('en-US');
+            const message = `Time: ${formattedTime}\nActive Subscriber: *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscount*`;
+
+            const chats = await client.getChats();
+            const targetGroups = ["LIGHTWAVE SALES GROUP", "Lightwave Technologies | Ranchi Call Center"];
+
+            for (const chat of chats) {
+                if (chat.isGroup && targetGroups.includes(chat.name)) {
+                    await chat.sendMessage(message);
+                }
+            }
+        } catch (error) {
+            console.error('Scheduled count task failed:', error.message);
+        }
+    };
+
+    cron.schedule('0 * * * *', scheduledTask, { timezone: "Asia/Kolkata" });  // Every hour
+    cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" }); // At 11:59 PM
+
+    console.log('Subscriber count tasks scheduled.');
 });
 
 client.on('qr', generateQRCode);
