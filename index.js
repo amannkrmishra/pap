@@ -1943,7 +1943,6 @@ const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
             if (subscriberId) subscriberDataCache.set(subscriberId, subscriberDetails);
             if (username) subscriberDataCache.set(username, subscriberDetails);
         }
-        console.log(`${subscriberDataCache.size / 2} records loaded from ${filename}.`);
         return subscriberDataCache;
     } catch (err) {
         console.error(`Error reading subscriber data from Excel: ${err.message}`);
@@ -2167,8 +2166,6 @@ const handleIncomingMessage = async (message) => {
 client.on('ready', () => {
     loadAllData();
     botStartTime = Date.now();
-    console.log('WhatsApp bot ready to use!!');
-
     const scheduledTask = async () => {
         try {
             const count = await getSubscriberCount();
@@ -2203,8 +2200,7 @@ client.on('ready', () => {
 
     // This schedule still runs at 11:59 PM as requested
     cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
-
-    console.log('Subscriber count tasks scheduled with quiet hours.');
+    console.log('WhatsApp bot ready to use!!');
 });
 
 client.on('qr', generateQRCode);
