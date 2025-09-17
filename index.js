@@ -300,7 +300,7 @@ const handleSubscriberUpdate = async (message) => {
 
     try {
         // 1. Ask for Username or Subscriber ID
-        await chat.sendMessage("Enter Username or Subscriber ID:");
+        await chat.sendMessage("Enter Username or ID:");
         const idMessage = await waitForReply(message);
         const userCode = idMessage.body.trim();
         if (!userCode) {
@@ -309,7 +309,6 @@ const handleSubscriberUpdate = async (message) => {
         }
 
         // 2. Fetch user data (Excel first, then live portal as a fallback)
-        await chat.sendMessage(`⏳ Looking up details for "${userCode}"...`);
         const userDataMap = await loadUserDataFromExcel(); // Load the local Excel cache
         const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
 
@@ -338,7 +337,6 @@ const handleSubscriberUpdate = async (message) => {
         }
         
         // 6. Perform the update via API call
-        await chat.sendMessage(`⏳ Updating details for *${userData.Username}*...`);
         const cookies = await getCookies();
         if (!cookies) {
             await chat.sendMessage("❌ Authentication failed. Cannot proceed.");
@@ -348,7 +346,7 @@ const handleSubscriberUpdate = async (message) => {
         const payload = new URLSearchParams({
             'cnumber': newPhoneNumber,
             'cemail': newEmail,
-            'id': userData.SubscriberId, // This uses the numerical ID, which was found in step 2
+            'id': userData.SubscriberId,
             'railwire_test_name': cookies.railwireCookie.value
         });
 
@@ -710,10 +708,10 @@ const handlePlanChange = async (message) => {
 
     // 3. Validate the input with clear rules
     if (usernames.length === 0 && subscriberIds.length > 0) {
-        return await chat.sendMessage("❌ Please provide a username (e.g., jh.rcn.name) for plan changes, not a subscriber ID.");
+        return await chat.sendMessage("❌ Please provide a username not a subscriber ID.");
     }
     if (usernames.length === 0) {
-        return await chat.sendMessage("❌ Username not found in the message. Please provide at least one username.");
+        return await chat.sendMessage("❌ Username not found in the message. send like this: planchange jh.xyz.username 800829");
     }
     if (potentialPackageIds.length === 0) {
         return await chat.sendMessage("❌ Please provide a 3 to 6-digit Package ID in your message.");
@@ -1892,7 +1890,7 @@ const handleIncomingMessage = async (message) => {
     if (messageBody === 'subscount') {
     const count = await getSubscriberCount();
     const formattedTime = new Date().toLocaleTimeString('en-US');
-    const replyMessage = `Time: ${formattedTime}\nActive Subscriber: *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscribercount*`;
+    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscribercount*`;
     await message.reply(replyMessage);
     return;
     }
@@ -1997,13 +1995,22 @@ client.on('ready', () => {
     loadAllData();
     botStartTime = Date.now();
     console.log('WhatsApp bot ready to use!!');
+
     const scheduledTask = async () => {
         try {
             const count = await getSubscriberCount();
             if (!count || count.includes('not found') || count.includes('retrieve')) return;
 
-            const formattedTime = new Date().toLocaleTimeString('en-US');
-            const message = `Time: ${formattedTime}\nActive Subscriber: *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscount*`;
+            const now = new Date();
+            const formattedTime = now.toLocaleTimeString('en-US');
+            let message;
+
+            // This is the new logic to change the message based on the time
+            if (now.getHours() === 0) { // Checks if the current hour is 0 (12:00 AM)
+                message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count at *9 AM* ☀️.\nTo check anytime type: *subscount*`;
+            } else {
+                message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscount*`;
+            }
 
             const chats = await client.getChats();
             const targetGroups = ["LIGHTWAVE SALES GROUP", "Lightwave Technologies | Ranchi Call Center"];
@@ -2018,10 +2025,13 @@ client.on('ready', () => {
         }
     };
 
-    cron.schedule('0 * * * *', scheduledTask, { timezone: "Asia/Kolkata" });  // Every hour
-    cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" }); // At 11:59 PM
+    // This schedule runs at midnight (0) and then every hour from 9 AM (9) to 11 PM (23)
+    cron.schedule('0 0,9-23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
-    console.log('Subscriber count tasks scheduled.');
+    // This schedule still runs at 11:59 PM as requested
+    cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+
+    console.log('Subscriber count tasks scheduled with quiet hours.');
 });
 
 client.on('qr', generateQRCode);
