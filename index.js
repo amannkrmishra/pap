@@ -400,7 +400,6 @@ const handleBulkSubscriberUpdate = async (message) => {
     }
 
     const { userCodes } = session;
-    await chat.sendMessage(`⏳ Starting bulk update for *${userCodes.length}* subscriber(s)...`);
 
     const cookies = await getCookies();
     if (!cookies) {
@@ -2132,6 +2131,7 @@ const handleSubmittedForm = async (link, oltabid, cookies, username, originalMes
     }
   };
  
+
 const handleIncomingMessage = async (message) => {
     const chat = await message.getChat();
     if (chat.isGroup && chat.name === 'Railtel & MSP team Jharkhand') {
@@ -2144,69 +2144,9 @@ const handleIncomingMessage = async (message) => {
 
     console.log(`User Detail: ${userIdentifier}`);
     console.log(`Message: ${messageBody}`);
+    const messageBodyNoSpaces = messageBody.replace(/\s/g, '');
 
-    if (messageBody.includes('subscount')) {
-    const count = await getSubscriberCount();
-    const formattedTime = new Date().toLocaleTimeString('en-US');
-    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nTo check anytime type: *subscount*`;
-    await message.reply(replyMessage);
-    return;
-    }
-
-    if (messageBody.startsWith('search ')) {
-        const searchTerm = message.body.substring(7).trim();
-        await handleSubscriberSearch(message, searchTerm);
-        return;
-    }
-
-    if (messageBody.includes('anpupdate')) {
-        await handleAnpUpdate(message);
-        return;
-    }
-
-    if (messageBody.includes('subsupdate')) {
-        await handleSubscriberUpdate(message);
-        return;
-    }
-
-    if (messageBody.includes('bulksubupdate')) {
-    await handleBulkSubscriberUpdate(message);
-    return;
-    }
-
-    if (messageBody === 'ticketupdate') {
-        await handleTicketActivation(message);
-        return;
-    }
-    if (messageBody.includes('checkott')) {
-        await checkComplaintStatus(message);
-        return;
-    }
-
-    if (messageBody === 'slastart') {
-        await createSLATicket(message);
-        return;
-    }
-
-    if (messageBody.includes('planchange') || messageBody.includes('planupdate')) {
-        await handlePlanChange(message);
-        return;
-    }
-
-    if (messageBody === 'cafupdate') {
-        const cookies = await getCookies();
-        if (!cookies) {
-            await message.reply('Failed to authenticate. Please try again later.');
-            return;
-        }
-
-        await message.reply('Looking for KYC...');
-        const totalProcessed = await processAllForms(cookies, message);
-        await message.reply(`Processed + Verified: ${totalProcessed}`);
-        return;
-    }
-
-    // Pattern matching for JH codes and subscriber IDs (using global flag 'g' to find all matches)
+    // Username/ID scanning logic
     const SESSION_TIMEOUT_MS = 600000;      // 10 minutes
     const ACCUMULATION_WINDOW_MS = 120000;  // 2 minutes
     
@@ -2223,24 +2163,84 @@ const handleIncomingMessage = async (message) => {
         const existingSession = userSessions.get(userIdentifier);
         let updatedUserCodes = allUserCodesInThisMessage;
 
-        // If a recent session exists, accumulate IDs. Otherwise, the new list is used.
         if (existingSession && (now - existingSession.lastUpdated < ACCUMULATION_WINDOW_MS)) {
             updatedUserCodes = [...new Set([...existingSession.userCodes, ...allUserCodesInThisMessage])];
         }
 
-        // Clear any old timeout and set a new 10-minute master timeout
         if (existingSession?.timeoutId) clearTimeout(existingSession.timeoutId);
         const newTimeoutId = setTimeout(() => userSessions.delete(userIdentifier), SESSION_TIMEOUT_MS);
 
         userSessions.set(userIdentifier, { userCodes: updatedUserCodes, lastUpdated: now, timeoutId: newTimeoutId });
     }
 
-    // Action keywords
+    if (messageBodyNoSpaces.includes('subscount') || messageBodyNoSpaces.includes('subscribercount')) {
+        const count = await getSubscriberCount();
+        const formattedTime = new Date().toLocaleTimeString('en-US');
+        const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\nTo check anytime type: *subscribercount*`;
+        await message.reply(replyMessage);
+        return;
+    }
+
+    if (messageBody.startsWith('search ')) {
+        const searchTerm = message.body.substring(7).trim();
+        await handleSubscriberSearch(message, searchTerm);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('anpupdate')) {
+        await handleAnpUpdate(message);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('subsupdate')) {
+        await handleSubscriberUpdate(message);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('bulksubupdate')) {
+        await handleBulkSubscriberUpdate(message);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('ticketupdate')) {
+        await handleTicketActivation(message);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('checkott')) {
+        await checkComplaintStatus(message);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('slastart')) {
+        await createSLATicket(message);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('planchange') || messageBodyNoSpaces.includes('planupdate')) {
+        await handlePlanChange(message);
+        return;
+    }
+
+    if (messageBodyNoSpaces.includes('cafupdate')) {
+        const cookies = await getCookies();
+        if (!cookies) {
+            await message.reply('Failed to authenticate. Please try again later.');
+            return;
+        }
+
+        await message.reply('Looking for KYC...');
+        const totalProcessed = await processAllForms(cookies, message);
+        await message.reply(`Processed + Verified: ${totalProcessed}`);
+        return;
+    }
+
+    // Action keywords (These are already flexible using regex)
     const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
     const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
     const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
 
-    // Handle OTT
+    // Handle OTT (already flexible)
     let serviceProvider = null;
     if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
     else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
