@@ -927,174 +927,6 @@ const checkComplaintStatus = async (message) => {
     }
 };
 
-// --- REPLACE THE OLD handleAnpUpdate FUNCTION WITH THIS FINAL VERSION ---
-
-// FINAL FEATURE: Handles interactive ANP detail updates with live search AND full data confirmation
-const handleAnpUpdate = async (message) => {
-    const chat = await message.getChat();
-
-    try {
-        // Part 1 & 2: Find the ANP and gather new info (This part is correct and unchanged)
-        await chat.sendMessage("Enter Partner Name or ID:");
-        const searchTerm = (await waitForReply(message)).body.trim();
-        if (!searchTerm) {
-            await chat.sendMessage("❌ Canceled. No search term provided.");
-            return;
-        }
-
-        const cookies = await getCookies();
-        if (!cookies) {
-            await chat.sendMessage("❌ Authentication failed. Cannot search.");
-            return;
-        }
-        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-        const listUrl = `${baseURL}/billcntl/billpartners`;
-        
-        const listResponse = await axios.get(listUrl, { headers: { 'Cookie': cookieString } });
-        const $ = cheerio.load(listResponse.data);
-
-        let match = null;
-        let multipleMatches = [];
-        const normalizedSearch = normalize(searchTerm);
-
-        $('table#dynamic-table tbody tr').each(function() {
-            const row = $(this);
-            const partnerId = normalize(row.find('td').eq(0).text());
-            const companyName = normalize(row.find('td').eq(1).find('a').text());
-            
-            if (partnerId === normalizedSearch || companyName === normalizedSearch) {
-                const foundMatch = {
-                    name: row.find('td').eq(1).find('a').text().trim(),
-                    id: row.find('td').eq(0).text().trim(),
-                    link: row.find('td').eq(1).find('a').attr('href')
-                };
-                multipleMatches.push(foundMatch);
-            }
-        });
-
-        if (multipleMatches.length === 0) {
-            await chat.sendMessage(`❌ No ANP found matching "${searchTerm}".`);
-            return;
-        } else if (multipleMatches.length > 1) {
-            await chat.sendMessage(`❌ Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
-            return;
-        } else {
-            match = multipleMatches[0];
-        }
-
-        await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
-        const phoneMessage = await waitForReply(message);
-        const newPhoneNumber = phoneMessage.body.trim();
-        if (!/^\d{10}$/.test(newPhoneNumber)) {
-            await chat.sendMessage("❌ Invalid phone number. Operation canceled.");
-            return;
-        }
-
-        await chat.sendMessage(`Input New Email ID:`);
-        const emailMessage = await waitForReply(message);
-        const newEmail = emailMessage.body.trim().toLowerCase();
-        if (!/\S+@\S+\.\S+/.test(newEmail)) {
-            await chat.sendMessage("❌ Invalid email format. Operation canceled.");
-            return;
-        }
-        
-        await chat.sendMessage(`Everything correct? (yes/no)`);
-        const bankReply = await waitForReply(message);
-        const updateBankDetails = bankReply.body.trim().toLowerCase() === 'yes';
-
-        // Part 3: Scrape detail page (This part is correct and unchanged)
-        const detailUrl = baseURL + match.link;
-        const detailResponse = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
-        const $$ = cheerio.load(detailResponse.data);
-
-        const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
-        const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
-        const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
-
-        let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
-        let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
-        
-        const payload = {
-            'railwire_test_name': cookies.railwireCookie.value, 'partnerid': scrapeHidden('partnerid'), 'cname': scrapeValue("Company Name"), 'cregno': scrapeValue("Company Registration Number"),
-            'caddress': scrapeHtml('caddress'), 'cmanager': scrapeValue("Contact Person"), 'cnumber': newPhoneNumber, 'cemail': newEmail, 'agreementdate': scrapeValue("Railwire Agreement Date"),
-            'agreementno': scrapeValue("Railwire Agreement No"), 'pancard': scrapeHidden('pancard'), 'bank_acholder': scrapeValue("Bank Account Holder Name"), 'bank_actype': scrapeValue("Bank Account Type"),
-            'bank_name': scrapeHtml('bank_name'), 'bank_branch': scrapeHtml('bank_branch'), 'bank_acno': scrapeValue("Bank Account No"), 'bank_ifsc': scrapeHidden('bank_ifsc'), 'gstin': gstin,
-            'sacno': scrapeValue("SAC No"), 'ptype': scrapeHtml('ptype'), 'gst_status': scrapeHidden("gststatus1"), 'legalname': scrapeHidden("legalnameval"), 'tradename': scrapeHidden("tradenameval"),
-            'ptnrattid': scrapeHtml('ptnrattid'), 'ptnrlang': scrapeHtml('ptnrlang'), 'territory_name': scrapeHidden('territory_name'), 'ring': scrapeValue("Ring"), 'brasip': scrapeValue("BRAS IP"),
-            'switchip': scrapeValue("Switch IP"), 'dropping': scrapeValue("Dropping"), 'interface': scrapeValue("Interface"), 'port_number': scrapeValue("Port Number"), 'pop_name': scrapeValue("Pop Name"),
-            'pop_pincode': scrapeValue("Pop Pin Code"), 'ngcomany': scrapeHidden('ngcomany'), 'brmobile': updateBankDetails ? newPhoneNumber : scrapeValue("Bank Registered Mobile No"),
-            'bremail': updateBankDetails ? newEmail : scrapeValue("Bank Registered Email ID"), 'reject_remark': "", 'onlinesub': "0", 'taxpayertype': 0, 'loc_type': null,
-            'onrechargeatom': 0, 'bankcheck': '1', 'subonrechargerazorpay': 0
-        };
-
-        // --- CORRECTED Part 4: Display ALL data for confirmation, just like the JS snippet ---
-        let confirmationMessage = `*Confirm Details*\n_Changes are highlighted in bold._\n\n`;
-        confirmationMessage += `*Partner ID:* ${payload.partnerid}\n`;
-        confirmationMessage += `*Company Name:* ${payload.cname}\n`;
-        confirmationMessage += `*Nature of Co:* ${payload.ngcomany}\n`;
-        confirmationMessage += `*Company Reg No:* ${payload.cregno}\n`;
-        confirmationMessage += `*Address:* ${payload.caddress}\n`;
-        confirmationMessage += `*Contact Person:* ${payload.cmanager}\n`;
-        confirmationMessage += `*Phone:* *${payload.cnumber}*\n`;
-        confirmationMessage += `*Email Address:* *${payload.cemail}*\n`;
-        confirmationMessage += `*PAN Card:* ${payload.pancard}\n`;
-        confirmationMessage += `*Agreement Date:* ${payload.agreementdate}\n`;
-        confirmationMessage += `*Agreement No:* ${payload.agreementno}\n`;
-        confirmationMessage += `*Partner Type:* ${payload.ptype}\n`;
-        confirmationMessage += `*Territory:* ${payload.territory_name}\n\n`;
-        confirmationMessage += `--- *GST Details* ---\n`;
-        confirmationMessage += `*GSTIN:* ${payload.gstin}\n`;
-        confirmationMessage += `*GST Legal Name:* ${payload.legalname}\n`;
-        confirmationMessage += `*GST Trade Name:* ${payload.tradename}\n`;
-        confirmationMessage += `*GST Status:* ${payload.gst_status}\n`;
-        confirmationMessage += `*SAC No:* ${payload.sacno}\n\n`;
-        confirmationMessage += `--- *Bank Details* ---\n`;
-        confirmationMessage += `*Bank Holder:* ${payload.bank_acholder}\n`;
-        confirmationMessage += `*Bank Acct Type:* ${payload.bank_actype}\n`;
-        confirmationMessage += `*Bank Name:* ${payload.bank_name}\n`;
-        confirmationMessage += `*Bank Branch:* ${payload.bank_branch}\n`;
-        confirmationMessage += `*Bank Acct No:* ${payload.bank_acno}\n`;
-        confirmationMessage += `*Bank IFSC:* ${payload.bank_ifsc}\n`;
-        confirmationMessage += `*Bank Mobile:* ${updateBankDetails ? `*${payload.brmobile}*` : payload.brmobile}\n`;
-        confirmationMessage += `*Bank Email:* ${updateBankDetails ? `*${payload.bremail}*` : payload.bremail}\n\n`;
-        confirmationMessage += `--- *Technical Details* ---\n`;
-        confirmationMessage += `*Ring:* ${payload.ring}\n`;
-        confirmationMessage += `*BRAS IP:* ${payload.brasip}\n`;
-        confirmationMessage += `*Switch IP:* ${payload.switchip}\n`;
-        confirmationMessage += `*Dropping:* ${payload.dropping}\n`;
-        confirmationMessage += `*Interface:* ${payload.interface}\n`;
-        confirmationMessage += `*Port Number:* ${payload.port_number}\n`;
-        confirmationMessage += `*POP Name:* ${payload.pop_name}\n`;
-        confirmationMessage += `*POP Pincode:* ${payload.pop_pincode}\n`;
-
-        await chat.sendMessage(confirmationMessage);
-        await chat.sendMessage("Correct? Type *yes* to submit, or anything else to cancel.");
-        const finalConfirmation = await waitForReply(message);
-
-        // --- Part 5: Final Submission (This part is correct and unchanged) ---
-        if (finalConfirmation.body.trim().toLowerCase() === 'yes') {
-            const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
-            const updateResponse = await axios.post(updateUrl, new URLSearchParams(payload), {
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookieString }
-            });
-
-            if (updateResponse.data && (updateResponse.data.STATUS === "OK" || updateResponse.data.STATUS === "BANK VERIFIED")) {
-                await chat.sendMessage(`✅ ANP details updated successfully for *${match.name}*!`);
-            } else {
-                const errorMsg = updateResponse.data ? (updateResponse.data.MESSAGE || updateResponse.data.STATUS) : "Unknown error";
-                await chat.sendMessage(`❌ Update failed for *${match.name}*. Server response: ${errorMsg}`);
-            }
-        } else {
-            await chat.sendMessage("❌ Update canceled by user. No changes were made.");
-            return;
-        }
-
-    } catch (error) {
-        console.error("Error during ANP update:", error.message);
-        await chat.sendMessage("❌ An unexpected error occurred during the ANP update process.");
-    }
-};
-
 // New function to handle OTT complaints automatically
 const processOTTComplaint = async (message, userIdentifier, serviceProvider) => {
     const { userCode } = userSessions.get(userIdentifier);
@@ -1943,6 +1775,7 @@ const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
             if (subscriberId) subscriberDataCache.set(subscriberId, subscriberDetails);
             if (username) subscriberDataCache.set(username, subscriberDetails);
         }
+        console.log(`${subscriberDataCache.size / 2} records loaded from ${filename}.`);
         return subscriberDataCache;
     } catch (err) {
         console.error(`Error reading subscriber data from Excel: ${err.message}`);
@@ -2054,15 +1887,10 @@ const handleIncomingMessage = async (message) => {
     console.log(`User Detail: ${userIdentifier}`);
     console.log(`Message: ${messageBody}`);
 
-    if (messageBody === 'anpupdate') {
-        await handleAnpUpdate(message);
-        return;
-    }
-
     if (messageBody === 'subscount') {
     const count = await getSubscriberCount();
     const formattedTime = new Date().toLocaleTimeString('en-US');
-    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscribercount*`;
+    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscount*`;
     await message.reply(replyMessage);
     return;
     }
@@ -2111,54 +1939,57 @@ const handleIncomingMessage = async (message) => {
     }
 
     // Pattern matching for JH codes and subscriber IDs (using global flag 'g' to find all matches)
-    let codePattern = /jh(\.\w+){2,}/gi;
-    let subscriberIdPattern = /\b\d{5,}\b/g;
+    const SESSION_TIMEOUT_MS = 600000;      // 10 minutes
+    const ACCUMULATION_WINDOW_MS = 120000;  // 2 minutes
     
-    let codeMatches = messageBody.match(codePattern) || [];
-    let subscriberIdMatches = messageBody.match(subscriberIdPattern) || [];
+    // More specific pattern matching
+    const codePattern = /jh(\.\w+){2,}/gi;
+    const subscriberIdPattern = /(?<!\d)\b\d{4,6}\b(?!\d)/g;
     
-    let allUserCodes = [...codeMatches, ...subscriberIdMatches].map(code => code.toLowerCase());
+    const codeMatches = messageBody.match(codePattern) || [];
+    const subscriberIdMatches = messageBody.match(subscriberIdPattern) || [];
+    const allUserCodesInThisMessage = [...new Set([...codeMatches, ...subscriberIdMatches])].map(c => c.toLowerCase());
 
-    if (allUserCodes.length > 0) {
-        // Get the existing session for the user, or create a new one if it doesn't exist.
-        const existingSession = userSessions.get(userIdentifier) || { userCodes: [] };
-        
-        // Combine the old user codes with the new ones found in the current message.
-        const combinedUserCodes = [...existingSession.userCodes, ...allUserCodes];
-        
-        // Use a Set to automatically remove any duplicate IDs, then convert back to an array.
-        const uniqueUserCodes = [...new Set(combinedUserCodes)];
-        
-        // Store the updated (accumulated and unique) list of user codes back into the session.
-        userSessions.set(userIdentifier, { userCodes: uniqueUserCodes });
+    if (allUserCodesInThisMessage.length > 0) {
+        const now = Date.now();
+        const existingSession = userSessions.get(userIdentifier);
+        let updatedUserCodes = allUserCodesInThisMessage;
+
+        // If a recent session exists, accumulate IDs. Otherwise, the new list is used.
+        if (existingSession && (now - existingSession.lastUpdated < ACCUMULATION_WINDOW_MS)) {
+            updatedUserCodes = [...new Set([...existingSession.userCodes, ...allUserCodesInThisMessage])];
+        }
+
+        // Clear any old timeout and set a new 10-minute master timeout
+        if (existingSession?.timeoutId) clearTimeout(existingSession.timeoutId);
+        const newTimeoutId = setTimeout(() => userSessions.delete(userIdentifier), SESSION_TIMEOUT_MS);
+
+        userSessions.set(userIdentifier, { userCodes: updatedUserCodes, lastUpdated: now, timeoutId: newTimeoutId });
     }
 
-    // Check for OTT issues and determine the service provider
-    let serviceProvider = null;
-    if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) {
-        serviceProvider = 'Hotstar_Super';
-    } else if (/\b(sony|sonyliv)\b/i.test(messageBody)) {
-        serviceProvider = 'SonyPremium';
-    }
-
-    // Standard action keywords
+    // Action keywords
     const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
     const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
     const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
 
-    // Handle OTT complaint with automatic service detection
+    // Handle OTT
+    let serviceProvider = null;
+    if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
+    else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
+
     if (serviceProvider && userSessions.has(userIdentifier)) {
         const session = userSessions.get(userIdentifier);
-        if (session.userCodes && session.userCodes.length > 0) {
-             // Temporarily set a single userCode for processOTTComplaint
+        if (session.userCodes?.length > 0) {
             userSessions.set(userIdentifier, { ...session, userCode: session.userCodes[0] });
             await processOTTComplaint(message, userIdentifier, serviceProvider);
         }
         return;
     }
-
-    // Handle standard actions (reset, session, deactivate)
+    
+    // Handle standard actions and clear session afterwards
     if ((wantsSessionReset || wantsPasswordReset || wantsDeactiveID) && userSessions.has(userIdentifier)) {
+        const session = userSessions.get(userIdentifier);
+        if (session?.timeoutId) clearTimeout(session.timeoutId);
         await processActions(message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsDeactiveID);
     }
 };
@@ -2166,6 +1997,8 @@ const handleIncomingMessage = async (message) => {
 client.on('ready', () => {
     loadAllData();
     botStartTime = Date.now();
+    console.log('WhatsApp bot ready to use!!');
+
     const scheduledTask = async () => {
         try {
             const count = await getSubscriberCount();
@@ -2200,7 +2033,8 @@ client.on('ready', () => {
 
     // This schedule still runs at 11:59 PM as requested
     cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
-    console.log('WhatsApp bot ready to use!!');
+
+    console.log('Subscriber count tasks scheduled with quiet hours.');
 });
 
 client.on('qr', generateQRCode);
