@@ -2307,25 +2307,28 @@ client.on('ready', () => {
     loadAllData();
     botStartTime = Date.now();
     const scheduledTask = async () => {
-        try {
-            const count = await getSubscriberCount();
-            const now = new Date();
-            const formattedTime = now.toLocaleTimeString('en-US');
-            const message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.\nTo check count anytime type: *subscount*`;
+    try {
+        const count = await getSubscriberCount();
+        const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
 
-            const chats = await client.getChats();
-            const targetGroups = ["Daily Count"];
+        const targetIds = [
+            '917004501523@c.us',  // Rakesh
+            '916200493605@c.us'  // Aman
+        ];
 
-            for (const chat of chats) {
-                if (chat.isGroup && targetGroups.includes(chat.name)) {
-                    await chat.sendMessage(message);
-                    await downloadAndSendSubscriberCSV(chat);
-                }
+        for (const id of targetIds) {
+            try {
+                const chat = await client.getChatById(id);
+                await chat.sendMessage(message);
+                await downloadAndSendSubscriberCSV(chat);
+            } catch (err) {
+                console.error(`Failed to send report to ID ${id}:`, err.message);
             }
-        } catch (error) {
-            console.error('Scheduled daily task failed:', error.message);
         }
-    };
+    } catch (error) {
+        console.error('Scheduled daily task failed:', error.message);
+    }
+};
 
     // This schedule runs once a day at 11:59 PM.
     cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
