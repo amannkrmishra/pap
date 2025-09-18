@@ -1,4 +1,4 @@
-﻿const { Client, LocalAuth } = require('whatsapp-web.js');
+﻿const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 
 const client = new Client({
   authStrategy: new LocalAuth(),
@@ -784,6 +784,47 @@ const waitForReply = async (originalMessage) => {
         client.on('message', listener);
     });
 };
+
+const downloadAndSendSubscriberCSV = async (chat) => {
+    try {
+        console.log("Attempting to download daily subscriber CSV...");
+        const cookies = await getCookies();
+        if (!cookies) throw new Error("Authentication failed for CSV download.");
+
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        
+        const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
+            headers: {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Cookie': cookieString,
+                'Sec-Fetch-Dest': 'document',
+            },
+            responseType: 'arraybuffer' // Crucial for file downloads
+        });
+
+        if (response.status !== 200) {
+            throw new Error(`Server responded with status ${response.status}`);
+        }
+
+        const today = new Date();
+        const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
+        const filePath = path.join(__dirname, fileName);
+
+        fs.writeFileSync(filePath, response.data);
+        
+        const media = MessageMedia.fromFilePath(filePath);
+        await chat.sendMessage(media, { caption: 'Daily Subscriber Report' });
+        
+        fs.unlinkSync(filePath); // Clean up the file after sending
+        console.log(`Successfully sent daily report to ${chat.name} and cleaned up file.`);
+
+    } catch (error) {
+        console.error('Error in downloadAndSendSubscriberCSV:', error.message);
+        await chat.sendMessage('❌ Failed to download the daily subscriber report.');
+    }
+};
+
 
 const handlePlanChange = async (message) => {
     const chat = await message.getChat();
@@ -2268,11 +2309,9 @@ client.on('ready', () => {
     const scheduledTask = async () => {
         try {
             const count = await getSubscriberCount();
-            if (!count || count.includes('not found') || count.includes('retrieve')) return;
-
             const now = new Date();
             const formattedTime = now.toLocaleTimeString('en-US');
-            const message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nFinal count for the day.\nTo check anytime type: *subscount*`;
+            const message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.\nTo check count anytime type: *subscount*`;
 
             const chats = await client.getChats();
             const targetGroups = ["Daily Count"];
@@ -2280,14 +2319,15 @@ client.on('ready', () => {
             for (const chat of chats) {
                 if (chat.isGroup && targetGroups.includes(chat.name)) {
                     await chat.sendMessage(message);
+                    await downloadAndSendSubscriberCSV(chat);
                 }
             }
         } catch (error) {
-            console.error('Scheduled count task failed:', error.message);
+            console.error('Scheduled daily task failed:', error.message);
         }
     };
 
-    // This schedule now ONLY runs once a day at 11:59 PM.
+    // This schedule runs once a day at 11:59 PM.
     cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
     
     console.log('WhatsApp bot ready to use!!');
