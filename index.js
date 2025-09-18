@@ -64,6 +64,21 @@ const toTitleCase = (str) => {
 
 const normalize = (str) => str?.toString().trim().toLowerCase() || '';
 
+const generateRandomMobile = () => {
+    const randomDigits = Math.floor(100000000 + Math.random() * 900000000).toString();
+    return `5${randomDigits}`;
+};
+
+const generateRandomEmail = (username) => {
+    if (!username || typeof username !== 'string') {
+        return `random${Date.now()}@gmail.com`;
+    }
+    const parts = username.split('.');
+    const namePart = parts[parts.length - 1];
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    return `${namePart}${randomNum}@gmail.com`.toLowerCase();
+};
+
 const maskName = (name) => {
     if (!name || typeof name !== 'string') return 'N/A';
     const parts = name.trim().split(/\s+/);
@@ -294,7 +309,7 @@ const refreshCookies = async () => {
     }
 };
 
-// NEW FEATURE: Handles interactive subscriber detail updates
+// Handles interactive subscriber detail updates
 const handleSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
 
@@ -371,6 +386,85 @@ const handleSubscriberUpdate = async (message) => {
         console.error("Error during subscriber update:", error.message);
         await chat.sendMessage("❌ An unexpected error occurred during the update process.");
     }
+};
+
+const handleBulkSubscriberUpdate = async (message) => {
+    const chat = await message.getChat();
+    const userIdentifier = getUserIdentifier(message);
+    const session = userSessions.get(userIdentifier);
+
+    // 1. Check if there are any user codes in the session
+    if (!session || !session.userCodes || session.userCodes.length === 0) {
+        await chat.sendMessage("❌ No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
+        return;
+    }
+
+    const { userCodes } = session;
+    await chat.sendMessage(`⏳ Starting bulk update for *${userCodes.length}* subscriber(s)...`);
+
+    const cookies = await getCookies();
+    if (!cookies) {
+        await chat.sendMessage("❌ Authentication failed. Cannot proceed.");
+        userSessions.delete(userIdentifier); // Clean up session on auth failure
+        return;
+    }
+
+    // 2. Loop through each user code from the session
+    for (const userCode of userCodes) {
+        try {
+            // Fetch live user data to get both SubscriberId and Username
+            const userData = await fetchUserDataFromPortal(userCode);
+
+            if (!userData || !userData.SubscriberId || !userData.Username) {
+                await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
+                continue; // Move to the next user in the loop
+            }
+
+            // 3. Generate random details for this user
+            const newPhoneNumber = generateRandomMobile();
+            const newEmail = generateRandomEmail(userData.Username);
+
+            // 4. Perform the update (reusing logic from the single update function)
+            const payload = new URLSearchParams({
+                'cnumber': newPhoneNumber,
+                'cemail': newEmail,
+                'id': userData.SubscriberId,
+                'railwire_test_name': cookies.railwireCookie.value
+            });
+
+            const config = {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                }
+            };
+
+            const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+
+            // 5. Send feedback to the user
+            if (response.data && response.data.STATUS === "OK") {
+                let reply = `*Username:* ${userData.Username}\n`;
+                reply += `*New Mobile No.:* ${newPhoneNumber}\n`;
+                reply += `*New Email ID:* ${newEmail}\n\n`;
+                reply += `✅ Details have been updated successfully.`;
+                await chat.sendMessage(reply);
+            } else {
+                const serverStatus = response.data ? response.data.STATUS : "No response";
+                await chat.sendMessage(`❌ Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
+            }
+
+        } catch (error) {
+            console.error(`Error during bulk update for ${userCode}:`, error.message);
+            await chat.sendMessage(`❌ An error occurred while processing *${userCode}*.`);
+        }
+        
+        // Add a small delay to avoid spamming the server
+        await new Promise(resolve => setTimeout(resolve, 150));
+    }
+
+    // 6. Clean up the session after the process is complete
+    userSessions.delete(userIdentifier);
+    await chat.sendMessage("✅ Bulk update process finished.");
 };
 
 
@@ -2051,10 +2145,10 @@ const handleIncomingMessage = async (message) => {
     console.log(`User Detail: ${userIdentifier}`);
     console.log(`Message: ${messageBody}`);
 
-    if (messageBody === 'subscount') {
+    if (messageBody.includes('subscount')) {
     const count = await getSubscriberCount();
     const formattedTime = new Date().toLocaleTimeString('en-US');
-    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscribercount*`;
+    const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nTo check anytime type: *subscount*`;
     await message.reply(replyMessage);
     return;
     }
@@ -2065,14 +2159,19 @@ const handleIncomingMessage = async (message) => {
         return;
     }
 
-    if (messageBody === 'anpupdate') {
+    if (messageBody.includes('anpupdate')) {
         await handleAnpUpdate(message);
         return;
     }
 
-    if (messageBody === 'subsupdate') {
+    if (messageBody.includes('subsupdate')) {
         await handleSubscriberUpdate(message);
         return;
+    }
+
+    if (messageBody.includes('bulksubupdate')) {
+    await handleBulkSubscriberUpdate(message);
+    return;
     }
 
     if (messageBody === 'ticketupdate') {
@@ -2173,17 +2272,10 @@ client.on('ready', () => {
 
             const now = new Date();
             const formattedTime = now.toLocaleTimeString('en-US');
-            let message;
-
-            // This is the new logic to change the message based on the time
-            if (now.getHours() === 0) { // Checks if the current hour is 0 (12:00 AM)
-                message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count at *9 AM* ☀️.\nTo check anytime type: *subscount*`;
-            } else {
-                message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nNext count in *1 hour* ⏳.\nTo check anytime type: *subscount*`;
-            }
+            const message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\n\nFinal count for the day.\nTo check anytime type: *subscount*`;
 
             const chats = await client.getChats();
-            const targetGroups = ["LIGHTWAVE SALES GROUP", "Lightwave Technologies | Ranchi Call Center"];
+            const targetGroups = ["Daily Count"];
 
             for (const chat of chats) {
                 if (chat.isGroup && targetGroups.includes(chat.name)) {
@@ -2195,11 +2287,9 @@ client.on('ready', () => {
         }
     };
 
-    // This schedule runs at midnight (0) and then every hour from 9 AM (9) to 11 PM (23)
-    cron.schedule('0 0,9-23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
-
-    // This schedule still runs at 11:59 PM as requested
+    // This schedule now ONLY runs once a day at 11:59 PM.
     cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+    
     console.log('WhatsApp bot ready to use!!');
 });
 
