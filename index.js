@@ -52,6 +52,7 @@ let lastAuthTime = 0;
 let refreshingPromise = null;
 let autoRefreshTimeout = null;
 let partnerIndex = null;
+let isProcessingComplaint = false
 let subscriberDataCache = null;
 
 const toTitleCase = (str) => {
@@ -1227,21 +1228,28 @@ const handleAnpUpdate = async (message) => {
     }
 };
 
-// New function to handle OTT complaints automatically
-const processOTTComplaint = async (message, userIdentifier, serviceProvider) => {
-    const { userCode } = userSessions.get(userIdentifier);
+const processOTTComplaint = async (message, userIdentifier, serviceProvider, userCode) => {
     const chat = await message.getChat();
-    
-    // Load OTT data
-    const ottData = await loadUserDataFromExcel();
-    const userData = ottData.get(userCode);
 
-    if (!userData) {
-        userSessions.delete(userIdentifier);
+    // If a complaint is already being processed, stop and inform the user.
+    if (isProcessingComplaint) {
+        await chat.sendMessage("⏳ The bot is busy with another complaint. Try again.");
         return;
     }
 
+    // LOCK: Set the "busy" sign for complaints.
+    isProcessingComplaint = true;
+
     try {
+        // Load OTT data
+        const ottData = await loadUserDataFromExcel();
+        const userData = ottData.get(userCode);
+
+        if (!userData) {
+            userSessions.delete(userIdentifier);
+            return;
+        }
+
         // Login to get UserId
         const loginResult = await login();
         
@@ -1285,6 +1293,7 @@ const processOTTComplaint = async (message, userIdentifier, serviceProvider) => 
         );
 
         const complaints = complaintsResponse.data;
+        // Using your original method as requested
         const latestComplaint = complaints.length > 0 ? complaints[0] : null;
 
         // Build reply
@@ -1301,11 +1310,15 @@ const processOTTComplaint = async (message, userIdentifier, serviceProvider) => 
 
         await chat.sendMessage(reply);
 
+        // We can just delete the session here; no need to do it at the start.
+        userSessions.delete(userIdentifier);
+
     } catch (error) {
         await chat.sendMessage(`❌ Error submitting complaint for ${userCode}.\n\nError: ${error.message}`);
+    } finally {
+        // UNLOCK: No matter what, remove the "busy" sign.
+        isProcessingComplaint = false;
     }
-
-    userSessions.delete(userIdentifier);
 };
 
 // Subjects list (already present in your file, keep it as global)
@@ -2193,7 +2206,7 @@ const handleIncomingMessage = async (message) => {
     
     // More specific pattern matching
     const codePattern = /jh(\.\w+){2,}/gi;
-    const subscriberIdPattern = /(?<!\d)\b\d{4,6}\b(?!\d)/g;
+    const subscriberIdPattern = /(?<![\.\/-])\b\d{4,5}\b(?!\d)/g;
     
     const codeMatches = messageBody.match(codePattern) || [];
     const subscriberIdMatches = messageBody.match(subscriberIdPattern) || [];
@@ -2277,9 +2290,9 @@ const handleIncomingMessage = async (message) => {
     }
 
     // Action keywords (These are already flexible using regex)
-    const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
-    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
-    const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
+    const wantsSessionReset = /\b(season|session|ip reset)\b/i.test(messageBody);
+    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated)\b/i.test(messageBody);
+    const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset|re-set)\b/i.test(messageBody);
 
     // Handle OTT (already flexible)
     let serviceProvider = null;
@@ -2288,9 +2301,9 @@ const handleIncomingMessage = async (message) => {
 
     if (serviceProvider && userSessions.has(userIdentifier)) {
         const session = userSessions.get(userIdentifier);
-        if (session.userCodes?.length > 0) {
-            userSessions.set(userIdentifier, { ...session, userCode: session.userCodes[0] });
-            await processOTTComplaint(message, userIdentifier, serviceProvider);
+        if (session.userCodes && session.userCodes.length > 0) {
+            const userCodeToProcess = session.userCodes[session.userCodes.length - 1];
+            await processOTTComplaint(message, userIdentifier, serviceProvider, userCodeToProcess);
         }
         return;
     }
@@ -2307,28 +2320,25 @@ client.on('ready', () => {
     loadAllData();
     botStartTime = Date.now();
     const scheduledTask = async () => {
-    try {
-        const count = await getSubscriberCount();
-        const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
+        try {
+            const count = await getSubscriberCount();
+            const now = new Date();
+            const formattedTime = now.toLocaleTimeString('en-US');
+            const message = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.\nTo check count anytime type: *subscount*`;
 
-        const targetIds = [
-            '917004501523@c.us',  // Rakesh
-            '916200493605@c.us'  // Aman
-        ];
+            const chats = await client.getChats();
+            const targetGroups = ["Daily Count"];
 
-        for (const id of targetIds) {
-            try {
-                const chat = await client.getChatById(id);
-                await chat.sendMessage(message);
-                await downloadAndSendSubscriberCSV(chat);
-            } catch (err) {
-                console.error(`Failed to send report to ID ${id}:`, err.message);
+            for (const chat of chats) {
+                if (chat.isGroup && targetGroups.includes(chat.name)) {
+                    await chat.sendMessage(message);
+                    await downloadAndSendSubscriberCSV(chat);
+                }
             }
+        } catch (error) {
+            console.error('Scheduled daily task failed:', error.message);
         }
-    } catch (error) {
-        console.error('Scheduled daily task failed:', error.message);
-    }
-};
+    };
 
     // This schedule runs once a day at 11:59 PM.
     cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
