@@ -316,7 +316,7 @@ const handleSubscriberUpdate = async (message) => {
 
     try {
         // 1. Ask for Username or Subscriber ID
-        await chat.sendMessage("Enter Username or ID:");
+        await chat.sendMessage("ID or Username:");
         const idMessage = await waitForReply(message);
         const userCode = idMessage.body.trim();
         if (!userCode) {
@@ -335,7 +335,7 @@ const handleSubscriberUpdate = async (message) => {
         }
 
         // 4. Ask for the new Phone Number
-        await chat.sendMessage(`Found: *${userData.Username}*\n\nEnter the new Phone Number:`);
+        await chat.sendMessage(`Found: *${userData.Username}*\n\nNew Phone Number:`);
         const phoneMessage = await waitForReply(message);
         const newPhoneNumber = phoneMessage.body.trim();
         if (!/^\d{10}$/.test(newPhoneNumber)) {
@@ -344,7 +344,7 @@ const handleSubscriberUpdate = async (message) => {
         }
 
         // 5. Ask for the new Email Address
-        await chat.sendMessage(`Enter the new Email Address:`);
+        await chat.sendMessage(`New Email Address:`);
         const emailMessage = await waitForReply(message);
         const newEmail = emailMessage.body.trim().toLowerCase();
         if (!/\S+@\S+\.\S+/.test(newEmail)) {
@@ -961,9 +961,11 @@ const handleSubscriberSearch = async (message, searchTerm) => {
         // If a match is found, format the details into a reply
         let reply = `*Subscriber Details*\n\n`;
         reply += `*Subscriber ID:* ${result['Subscriber ID'] || 'N/A'}\n`;
+        reply += `*Phone no.:* ${result['Mobile no'] || 'N/A'}\n`;
         reply += `*Username:* ${result['Username'] || 'N/A'}\n`;
         reply += `*ANP ID:* ${result['ANP ID'] || 'N/A'}\n`;
         reply += `*ANP Name:* ${result['ANP Name'] || 'N/A'}\n`;
+        reply += `*ANP no.:* ${result['ANP No'] || 'N/A'}\n`;
         reply += `*District:* ${result['District'] || 'N/A'}\n`;
         reply += `*Stack VLAN:* ${result['Stack VLAN'] || 'N/A'}\n`;
         reply += `*Customer VLAN:* ${result['Customer VLAN'] || 'N/A'}\n`;
@@ -2070,8 +2072,10 @@ const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
             const subscriberDetails = {
                 'Subscriber ID': row['Subscriber ID'],
                 'Username': row['Username'],
+                'Mobile No': row['Mobile No'],
                 'ANP ID': row['ANP ID'],
                 'ANP Name': row['ANP Name'],
+                'ANP No': row['ANP No'],
                 'District': row['District'],
                 'Stack VLAN': row['Stack VLAN'],
                 'Customer VLAN': row['Customer VLAN'],
