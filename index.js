@@ -2234,7 +2234,7 @@ const handleIncomingMessage = async (message) => {
     if (messageBodyNoSpaces.includes('subscount') || messageBodyNoSpaces.includes('subscribercount')) {
         const count = await getSubscriberCount();
         const formattedTime = new Date().toLocaleTimeString('en-US');
-        const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\nTo check anytime type: *subscribercount*`;
+        const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\nTo check anytime type: *subscount*`;
         await message.reply(replyMessage);
         return;
     }
@@ -2287,21 +2287,22 @@ const handleIncomingMessage = async (message) => {
             return;
         }
 
-        await message.reply('Looking for KYC...');
+        await message.reply('Checking KYC...');
         const totalProcessed = await processAllForms(cookies, message);
-        await message.reply(`Processed + Verified: ${totalProcessed}`);
+        await message.reply(`Completed: ${totalProcessed}`);
         return;
     }
 
-    // Action keywords (These are already flexible using regex)
-    const wantsSessionReset = /\b(season|session|ip reset)\b/i.test(messageBody);
-    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated)\b/i.test(messageBody);
-    const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset|re-set)\b/i.test(messageBody);
+    // Action keywords
+    const wantsSessionReset = /\b(season|session|sessionclear)\b/i.test(messageBody);
+    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activate)\b/i.test(messageBody);
+    const wantsPasswordReset = /\b(reset|resad|risat|resat|resert|resate|risit|rest|reser|riset|re-set)\b/i.test(messageBody);
 
-    // Handle OTT (already flexible)
+    // Handle OTT
     let serviceProvider = null;
     if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
-    else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
+    else if (/\b(sony|sonyliv|sony-liv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
+    else if (/\b(zee5|zee|zee-5)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
 
     if (serviceProvider && userSessions.has(userIdentifier)) {
         const session = userSessions.get(userIdentifier);
