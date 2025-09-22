@@ -66,9 +66,10 @@ let partnerLiveDetailsCache = null;
 
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
-    THRESHOLD: 8, // percentage
+    THRESHOLD_PERCENTAGE: 8, // Changed from THRESHOLD
     TARGET_ID: '916200493605@c.us',
     GROUP_NAME: 'Daily Count',
+    EXCEL_FILE_NAME: 'PartnerLive.xlsx', // Added this
     IGNORED_PARTNER_IDS: new Set([
         '3474487439', '5283639869', '2568065682', '2425852224', '6378518993',
         '8878892435', '6834570680', '6195650370', '6933249503', '5950839426',
@@ -76,7 +77,7 @@ const ANP_CONFIG = {
     ])
 };
 
-const downPartners = new Map();
+const downPartnersState = new Map();
 
 const sendAnpAlert = async (message) => {
     // Send to Aman
@@ -2418,7 +2419,9 @@ const handleIncomingMessage = async (message) => {
     }
 
     if (messageBodyNoSpaces.includes('anpcheck')) {
-        await handleAnpCheck(message);
+        await message.reply('🤖 Running ANP status check...');
+        await runAnpStatusCheckAndNotify();
+        await message.reply('✅ ANP check completed');
         return;
     }
 
@@ -2533,7 +2536,7 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
-    cron.schedule('*/30 * * * *', checkAnpStatus, {
+    cron.schedule('*/30 * * * *', runAnpStatusCheckAndNotify, {
         timezone: "Asia/Kolkata"
     });
 
@@ -2550,7 +2553,59 @@ client.on('message', (message) => {
     handleIncomingMessage(message);
 });
 
-const loadPartnerLiveDetails = (filename = CHECKER_CONFIG.EXCEL_FILE_NAME) => {
+const formatDuration = (ms) => {
+    if (ms < 0) ms = 0;
+    const totalMinutes = Math.floor(ms / 60000);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    let str = '';
+    if (hours > 0) str += `${hours} hour${hours > 1 ? 's' : ''}`;
+    if (minutes > 0) str += `${hours > 0 ? ' and ' : ''}${minutes} minute${minutes > 1 ? 's' : ''}`;
+    return str === '' ? 'for less than a minute' : `for ${str}`;
+};
+
+const getNmsSession = async (billingCookies) => {
+    const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
+    const { data } = await axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } });
+    const $ = cheerio.load(data);
+    const nmsUsername = $('#srvs_redi input[name="username"]').val();
+    const nmsPassword = $('#srvs_redi input[name="password"]').val();
+    if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
+
+    const { headers } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 });
+    if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
+    return headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+};
+
+const getAllPartners = async (billingCookies) => {
+    const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
+    const { data } = await axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`, { headers: { 'Cookie': billingCookieString, 'Referer': `${baseURL}/billcntl/all_sms_templates` } });
+    const $ = cheerio.load(data);
+    const partners = [];
+    $('table tbody tr').each((i, elem) => {
+        const tds = $(elem).find('td');
+        if (tds.length < 4) return;
+        const partnerId = $(tds[0]).find('input').val();
+        const partnerName = $(tds[2]).text().trim();
+        const totalSubs = parseInt($(tds[3]).text().trim(), 10);
+        if (partnerId && partnerName && !isNaN(totalSubs)) partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
+    });
+    if (partners.length === 0) throw new Error("ANP Checker: Could not find any partners.");
+    return partners;
+};
+
+const getLiveOnlineCount = async (partnerId, nmsCookie) => {
+    try {
+        const { data } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`, new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': nmsCookie, 'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php` }, timeout: 15000 });
+        const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
+        return match ? parseInt(match[1], 10) : null;
+    } catch (error) {
+        console.error(`ANP Checker: Error for ${partnerId}: ${error.message}`);
+        return 'Error';
+    }
+};
+
+const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
     if (partnerLiveDetailsCache) return partnerLiveDetailsCache;
     try {
         const filePath = path.join(__dirname, filename);
@@ -2573,112 +2628,28 @@ const loadPartnerLiveDetails = (filename = CHECKER_CONFIG.EXCEL_FILE_NAME) => {
     }
 };
 
-const getNmsAuth = async () => {
-    const cookies = await getCookies();
-    const billingCookie = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-
-    const { data } = await axios.get(`${baseURL}/billcntl`, { headers: { Cookie: billingCookie } });
-    const $ = cheerio.load(data);
-    const username = $('#srvs_redi input[name="username"]').val();
-    const password = $('#srvs_redi input[name="password"]').val();
-
-    if (!username || !password) throw new Error("ANP Checker: Could not find NMS credentials.");
-
-    const { headers } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`,
-        new URLSearchParams({
-            username: username,
-            password: password,
-            circle: $('#srvs_redi input[name="circle"]').val()
-        }),
-        { maxRedirects: 0, validateStatus: status => status === 302 });
-
-    if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
-    return headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
-};
-
-const getPartners = async () => {
-    const cookies = await getCookies();
-    const billingCookie = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-
-    const { data } = await axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`,
-        {
-            headers: {
-                'Cookie': billingCookie,
-                'Referer': `${baseURL}/billcntl/all_sms_templates`
-            }
-        });
-
-    const $ = cheerio.load(data);
-    const partners = [];
-
-    $('table tbody tr').each((i, elem) => {
-        const tds = $(elem).find('td');
-        if (tds.length < 4) return;
-
-        const partnerId = $(tds[0]).find('input').val();
-        const partnerName = $(tds[2]).text().trim();
-        const totalSubs = parseInt($(tds[3]).text().trim(), 10);
-
-        if (partnerId && partnerName && !isNaN(totalSubs)) {
-            partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
-        }
-    });
-
-    if (partners.length === 0) throw new Error("ANP Checker: Could not find any partners.");
-    return partners;
-};
-
-const getLiveCount = async (partnerId, nmsCookie) => {
+const runAnpStatusCheckAndNotify = async () => {
     try {
-        const { data } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`,
-            new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }),
-            {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': nmsCookie,
-                    'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php`
-                }, timeout: 15000
-            });
-
-        const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
-        return match ? parseInt(match[1], 10) : null;
-    } catch (error) {
-        console.error(`ANP Checker: Error for ${partnerId}: ${error.message}`);
-        return 'Error';
-    }
-};
-
-const formatDuration = (ms) => {
-    if (ms < 0) ms = 0;
-    const totalMinutes = Math.floor(ms / 60000);
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    let str = '';
-    if (hours > 0) str += `${hours} hour${hours > 1 ? 's' : ''}`;
-    if (minutes > 0) str += `${hours > 0 ? ' and ' : ''}${minutes} minute${minutes > 1 ? 's' : ''}`;
-    return str === '' ? 'for less than a minute' : `for ${str}`;
-};
-
-const checkAnpStatus = async () => {
-    console.log("--- Starting ANP Status Check (Stateful) ---");
-    try {
-        const nmsCookie = await getNmsAuth();
-        const allPartners = await getPartners();
+        const billingCookies = await getCookies();
+        if (!billingCookies) throw new Error("ANP Checker: Main auth failed.");
+        const nmsCookie = await getNmsSession(billingCookies);
+        const allPartners = await getAllPartners(billingCookies);
         const extraDetails = loadPartnerLiveDetails();
+
         const currentProblemPartners = new Map();
         const recoveredPartners = [];
 
         for (const p of allPartners) {
             if (p.total_subs === 0) continue;
-            const liveCount = await getLiveCount(p.id, nmsCookie);
-            const isDown = liveCount === 'Error' || (liveCount !== null && liveCount < (p.total_subs * (ANP_CONFIG.THRESHOLD / 100)));
+            const liveCount = await getLiveOnlineCount(p.id, nmsCookie);
+            const isDown = liveCount === 'Error' || (liveCount !== null && liveCount < (p.total_subs * (ANP_CONFIG.THRESHOLD_PERCENTAGE / 100)));
 
             if (isDown) {
                 p.live_subs = liveCount;
                 currentProblemPartners.set(p.id, p);
-            } else if (downPartners.has(p.id)) {
-                recoveredPartners.push(downPartners.get(p.id));
-                downPartners.delete(p.id);
+            } else if (downPartnersState.has(p.id)) {
+                recoveredPartners.push(downPartnersState.get(p.id).details);
+                downPartnersState.delete(p.id);
             }
             await new Promise(resolve => setTimeout(resolve, 50));
         }
@@ -2687,18 +2658,18 @@ const checkAnpStatus = async () => {
         const reportable = [...currentProblemPartners.values()].filter(p => !ANP_CONFIG.IGNORED_PARTNER_IDS.has(p.id));
 
         for (const p of reportable) {
-            if (downPartners.has(p.id)) {
-                const duration = formatDuration(Date.now() - downPartners.get(p.id));
+            if (downPartnersState.has(p.id)) {
+                const duration = formatDuration(Date.now() - downPartnersState.get(p.id).firstSeen);
                 stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs}/${p.total_subs}) is still down ${duration}.`);
             } else {
-                downPartners.set(p.id, Date.now());
+                downPartnersState.set(p.id, { firstSeen: Date.now(), details: p });
                 newAlerts.push(p);
             }
         }
 
         if (recoveredPartners.length > 0) {
             let msg = `🤖 *Bot Detected: ANP Recovered*\n\nThe following are back online:\n`;
-            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name || p}*` });
+            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*` });
             await sendAnpAlert(msg);
         }
         if (stillDownAlerts.length > 0) {
@@ -2708,9 +2679,9 @@ const checkAnpStatus = async () => {
             let msg = `🤖 *Bot Detected: ANP Down*\n\nFound *${newAlerts.length}* new problem(s):\n`;
             newAlerts.sort((a, b) => a.name.localeCompare(b.name)).forEach(p => {
                 const details = extraDetails[p.id] || {};
-                const percent = p.total_subs > 0 ? `(${(p.live_subs / p.total_subs * 100).toFixed(1)}%)` : '';
+                const percent = p.total_subs > 0 ? `(${(p.live_subs === 'Error' ? 0 : p.live_subs) / p.total_subs * 100}.toFixed(1)}%)` : '';
                 msg += `\n-------------------------------------\n` +
-                    `_The ANP may be facing a link down issue. Please investigate._\n\n` +
+                    `*The ANP maybe facing a link down / fiber break. Please check.*\n\n` +
                     `*ANP Name:* ${p.name}\n` +
                     `*ANP ID:* ${p.id}\n` +
                     `*Total Subs:* ${p.total_subs}\n` +
@@ -2734,13 +2705,6 @@ const checkAnpStatus = async () => {
         console.error("❌ ANP Check CRITICAL ERROR:", error.message);
         await sendAnpAlert(`🤖 *Bot Error: ANP Check Failed*\n\nError: _${error.message}_`);
     }
-};
-
-// Manual trigger - NEW FUNCTION
-const handleAnpCheck = async (message) => {
-    await message.reply('🤖 Running ANP status check...');
-    await checkAnpStatus();
-    await message.reply('✅ ANP check completed');
 };
 
 client.initialize();
