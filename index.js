@@ -66,7 +66,7 @@ let partnerLiveDetailsCache = null;
 
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
-    THRESHOLD_PERCENTAGE: 8, // Changed from THRESHOLD
+    THRESHOLD_PERCENTAGE: 6, // Changed from THRESHOLD
     TARGET_ID: '916200493605@c.us',
     GROUP_NAME: 'Daily Count',
     EXCEL_FILE_NAME: 'PartnerLive.xlsx', // Added this
@@ -2660,7 +2660,7 @@ const runAnpStatusCheckAndNotify = async () => {
         for (const p of reportable) {
             if (downPartnersState.has(p.id)) {
                 const duration = formatDuration(Date.now() - downPartnersState.get(p.id).firstSeen);
-                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs}/${p.total_subs}) is still down ${duration}.`);
+                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs}) is down ${duration}.`);
             } else {
                 downPartnersState.set(p.id, { firstSeen: Date.now(), details: p });
                 newAlerts.push(p);
@@ -2668,12 +2668,12 @@ const runAnpStatusCheckAndNotify = async () => {
         }
 
         if (recoveredPartners.length > 0) {
-            let msg = `🤖 *Bot Detected: ANP Recovered*\n\nThe following are back online:\n`;
+            let msg = `*Bot Detected: ANP Recovered*\n\nThe following are back online:\n`;
             recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*` });
             await sendAnpAlert(msg);
         }
         if (stillDownAlerts.length > 0) {
-            await sendAnpAlert(`🤖 *Bot Alert: ANP Still Down*\n\n${stillDownAlerts.join('\n')}`);
+            await sendAnpAlert(`*Bot Alert: ANP Still Down*\n\n${stillDownAlerts.join('\n')}`);
         }
         if (newAlerts.length > 0) {
             newAlerts.sort((a, b) => a.name.localeCompare(b.name));
@@ -2681,21 +2681,17 @@ const runAnpStatusCheckAndNotify = async () => {
                 const details = extraDetails[p.id] || {};
 
                 let msg = `🤖 *Bot Detected: ANP Down*\n\n`;
+                msg += `*Status:* Link maybe down\n\n`;
                 msg += `*ANP Name:* ${p.name}\n`;
-                msg += `*ANP ID:* ${p.id}\n`;
                 msg += `*Total Subscriber:* ${p.total_subs}\n`;
                 msg += `*Currently Online:* ${p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs}\n`;
                 msg += `*JH Code:* ${details['JH Code'] || 'N/A'}\n`;
                 msg += `*District:* ${details['District'] || 'N/A'}\n`;
-                msg += `*Contact Name:* ${details['Contact Name'] || 'N/A'}\n`;
                 msg += `*Contact No:* ${details['Contact No'] || 'N/A'}\n`;
                 msg += `*Stack VLAN:* ${details['Stack VLAN'] || 'N/A'}\n`;
                 msg += `*Customer VLAN:* ${details['Customer VLAN'] || 'N/A'}\n`;
                 msg += `*Primary Port:* ${details['Primary Port'] || 'N/A'}\n`;
-                msg += `*Backup Port:* ${details['Backup Port'] || 'N/A'}\n`;
                 msg += `*BNG:* ${details['BNG'] || 'N/A'}\n`;
-                msg += `*Status:* Link may be down\n\n`;
-                msg += `*The ANP may be facing a link down issue.*`;
 
                 await sendAnpAlert(msg);
                 await new Promise(resolve => setTimeout(resolve, 500)); // 1 second delay between messages
