@@ -74,6 +74,7 @@ const ANP_CONFIG = {
         '3474487439', '5283639869', '2568065682', '2425852224', '6378518993',
         '8878892435', '6834570680', '6195650370', '6933249503', '5950839426',
         '5570382470', '2005592154', '3423963007', '1163822769', '1840251248',
+        '4352542809', '2090233061', '6096321831',
     ])
 };
 
@@ -2482,7 +2483,7 @@ const handleIncomingMessage = async (message) => {
     let serviceProvider = null;
     if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
     else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
-    else if (/\b(zee5|zee)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
+    else if (/\b(zee5|zee|zee-5)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
 
     if (serviceProvider && userSessions.has(userIdentifier)) {
         const session = userSessions.get(userIdentifier);
@@ -2623,7 +2624,7 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
         console.log(`ANP Checker: Loaded details for ${Object.keys(detailsDict).length} partners.`);
         return (partnerLiveDetailsCache = detailsDict);
     } catch (e) {
-        console.error(`❌ ANP Checker ERROR: Failed to load Excel file '${filename}'.`);
+        console.error(`ANP Checker ERROR: Failed to load Excel file '${filename}'.`);
         return (partnerLiveDetailsCache = {});
     }
 };
@@ -2668,19 +2669,19 @@ const runAnpStatusCheckAndNotify = async () => {
         }
 
         if (recoveredPartners.length > 0) {
-            let msg = `*Bot Detected: ANP Recovered*\n\nThe following are back online:\n`;
+            let msg = `*Detected: ANP Link UP*\n\nThe following are back online:\n`;
             recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*` });
             await sendAnpAlert(msg);
         }
         if (stillDownAlerts.length > 0) {
-            await sendAnpAlert(`*Bot Alert: ANP Still Down*\n\n${stillDownAlerts.join('\n')}`);
+            await sendAnpAlert(`*Alert: ANP Still Down Report*\n\n${stillDownAlerts.join('\n')}`);
         }
         if (newAlerts.length > 0) {
             newAlerts.sort((a, b) => a.name.localeCompare(b.name));
             for (const p of newAlerts) {
                 const details = extraDetails[p.id] || {};
 
-                let msg = `🤖 *Bot Detected: ANP Down*\n\n`;
+                let msg = `*Detected: ANP Link Down*\n\n`;
                 msg += `*Status:* Link maybe down\n\n`;
                 msg += `*ANP Name:* ${p.name}\n`;
                 msg += `*Total Subscriber:* ${p.total_subs}\n`;
