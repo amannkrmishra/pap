@@ -2582,10 +2582,17 @@ const getNmsAuth = async () => {
     const username = $('#srvs_redi input[name="username"]').val();
     const password = $('#srvs_redi input[name="password"]').val();
 
+    if (!username || !password) throw new Error("ANP Checker: Could not find NMS credentials.");
+
     const { headers } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`,
-        new URLSearchParams({ username, password, circle: 'JH' }),
+        new URLSearchParams({
+            username: username,
+            password: password,
+            circle: $('#srvs_redi input[name="circle"]').val()
+        }),
         { maxRedirects: 0, validateStatus: status => status === 302 });
 
+    if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
     return headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
 };
 
@@ -2594,7 +2601,12 @@ const getPartners = async () => {
     const billingCookie = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
 
     const { data } = await axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`,
-        { headers: { Cookie: billingCookie } });
+        {
+            headers: {
+                'Cookie': billingCookie,
+                'Referer': `${baseURL}/billcntl/all_sms_templates`
+            }
+        });
 
     const $ = cheerio.load(data);
     const partners = [];
@@ -2603,28 +2615,36 @@ const getPartners = async () => {
         const tds = $(elem).find('td');
         if (tds.length < 4) return;
 
-        const id = $(tds[0]).find('input').val();
-        const name = $(tds[2]).text().trim();
-        const total = parseInt($(tds[3]).text().trim(), 10);
+        const partnerId = $(tds[0]).find('input').val();
+        const partnerName = $(tds[2]).text().trim();
+        const totalSubs = parseInt($(tds[3]).text().trim(), 10);
 
-        if (id && name && total > 0) {
-            partners.push({ id, name, total });
+        if (partnerId && partnerName && !isNaN(totalSubs)) {
+            partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
         }
     });
 
+    if (partners.length === 0) throw new Error("ANP Checker: Could not find any partners.");
     return partners;
 };
 
 const getLiveCount = async (partnerId, nmsCookie) => {
     try {
         const { data } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`,
-            new URLSearchParams({ search1: 'search', ptnr: partnerId }),
-            { headers: { Cookie: nmsCookie }, timeout: 15000 });
+            new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }),
+            {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': nmsCookie,
+                    'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php`
+                }, timeout: 15000
+            });
 
         const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
-        return match ? parseInt(match[1], 10) : 0;
-    } catch {
-        return 0;
+        return match ? parseInt(match[1], 10) : null;
+    } catch (error) {
+        console.error(`ANP Checker: Error for ${partnerId}: ${error.message}`);
+        return 'Error';
     }
 };
 
@@ -2640,93 +2660,79 @@ const formatDuration = (ms) => {
 };
 
 const checkAnpStatus = async () => {
+    console.log("--- Starting ANP Status Check (Stateful) ---");
     try {
         const nmsCookie = await getNmsAuth();
-        const partners = await getPartners();
-        const partnerDetails = loadPartnerLiveDetails();
-        const newDown = [];
-        const recovered = [];
-        const stillDown = [];
+        const allPartners = await getPartners();
+        const extraDetails = loadPartnerLiveDetails();
+        const currentProblemPartners = new Map();
+        const recoveredPartners = [];
 
-        for (const partner of partners) {
-            // Skip ignored partners
-            if (ANP_CONFIG.IGNORED_PARTNER_IDS.has(partner.id)) continue;
-
-            const liveCount = await getLiveCount(partner.id, nmsCookie);
-            const threshold = partner.total * (ANP_CONFIG.THRESHOLD / 100);
-            const isDown = liveCount === 'Error' || (liveCount !== null && liveCount < threshold);
+        for (const p of allPartners) {
+            if (p.total_subs === 0) continue;
+            const liveCount = await getLiveCount(p.id, nmsCookie);
+            const isDown = liveCount === 'Error' || (liveCount !== null && liveCount < (p.total_subs * (ANP_CONFIG.THRESHOLD / 100)));
 
             if (isDown) {
-                if (!downPartners.has(partner.id)) {
-                    newDown.push({ ...partner, live: liveCount });
-                    downPartners.set(partner.id, Date.now());
-                } else {
-                    // Already down, add to still down list
-                    const duration = Date.now() - downPartners.get(partner.id);
-                    const hours = Math.floor(duration / (1000 * 60 * 60));
-                    const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
-                    let timeStr = '';
-                    if (hours > 0) timeStr += `${hours}h `;
-                    if (minutes > 0) timeStr += `${minutes}m`;
-                    stillDown.push({ ...partner, live: liveCount, downTime: timeStr || '< 1m' });
-                }
-            } else if (downPartners.has(partner.id)) {
-                recovered.push(partner);
-                downPartners.delete(partner.id);
+                p.live_subs = liveCount;
+                currentProblemPartners.set(p.id, p);
+            } else if (downPartners.has(p.id)) {
+                recoveredPartners.push(downPartners.get(p.id));
+                downPartners.delete(p.id);
+            }
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+
+        const newAlerts = [], stillDownAlerts = [];
+        const reportable = [...currentProblemPartners.values()].filter(p => !ANP_CONFIG.IGNORED_PARTNER_IDS.has(p.id));
+
+        for (const p of reportable) {
+            if (downPartners.has(p.id)) {
+                const duration = formatDuration(Date.now() - downPartners.get(p.id));
+                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs}/${p.total_subs}) is still down ${duration}.`);
+            } else {
+                downPartners.set(p.id, Date.now());
+                newAlerts.push(p);
             }
         }
 
-        // Send recovery alerts
-        if (recovered.length > 0) {
-            let msg = `🤖 *Bot Detected: ANP Recovered*\n\n`;
-            recovered.forEach(p => msg += `✅ *${p.name}* is back online\n`);
+        if (recoveredPartners.length > 0) {
+            let msg = `🤖 *Bot Detected: ANP Recovered*\n\nThe following are back online:\n`;
+            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name || p}*` });
             await sendAnpAlert(msg);
         }
-
-        // Send still down alerts (only if there are some)
-        if (stillDown.length > 0) {
-            let msg = `🤖 *Bot Alert: ANP Still Down*\n\n`;
-            stillDown.forEach(p => {
-                const percent = p.live === 'Error' ? 'ERROR' : ((p.live / p.total) * 100).toFixed(1) + '%';
-                msg += `⚠️ *${p.name}* down for ${p.downTime} (${p.live}/${p.total} - ${percent})\n`;
+        if (stillDownAlerts.length > 0) {
+            await sendAnpAlert(`🤖 *Bot Alert: ANP Still Down*\n\n${stillDownAlerts.join('\n')}`);
+        }
+        if (newAlerts.length > 0) {
+            let msg = `🤖 *Bot Detected: ANP Down*\n\nFound *${newAlerts.length}* new problem(s):\n`;
+            newAlerts.sort((a, b) => a.name.localeCompare(b.name)).forEach(p => {
+                const details = extraDetails[p.id] || {};
+                const percent = p.total_subs > 0 ? `(${(p.live_subs / p.total_subs * 100).toFixed(1)}%)` : '';
+                msg += `\n-------------------------------------\n` +
+                    `_The ANP may be facing a link down issue. Please investigate._\n\n` +
+                    `*ANP Name:* ${p.name}\n` +
+                    `*ANP ID:* ${p.id}\n` +
+                    `*Total Subs:* ${p.total_subs}\n` +
+                    `*Active Subs:* ${p.live_subs === 'Error' ? '⚠️ ERROR' : `${p.live_subs}`} ${percent}\n` +
+                    `*JH Code:* ${details['JH Code'] || 'N/A'}\n` +
+                    `*District:* ${details['District'] || 'N/A'}\n` +
+                    `*Contact Name:* ${details['Contact Name'] || 'N/A'}\n` +
+                    `*Contact No:* ${details['Contact No'] || 'N/A'}\n` +
+                    `*Stack VLAN:* ${details['Stack VLAN'] || 'N/A'}\n` +
+                    `*Customer VLAN:* ${details['Customer VLAN'] || 'N/A'}\n` +
+                    `*Primary Port:* ${details['Primary Port'] || 'N/A'}\n` +
+                    `*Backup Port:* ${details['Backup Port'] || 'N/A'}\n` +
+                    `*BNG:* ${details['BNG'] || 'N/A'}\n`;
             });
             await sendAnpAlert(msg);
         }
-
-        // Send new down alerts
-        if (newDown.length > 0) {
-            let msg = `🤖 *Bot Detected: ANP Down*\n\n`;
-            msg += `Found ${newDown.length} new issue(s):\n\n`;
-
-            newDown.forEach(p => {
-                const details = partnerDetails[p.id] || {};
-                const percent = p.live === 'Error' ? 'ERROR' : ((p.live / p.total) * 100).toFixed(1) + '%';
-
-                msg += `🚨 *${p.name}*\n`;
-                msg += `*Partner ID:* ${p.id}\n`;
-                msg += `*JH Code:* ${details['JH Code'] || 'N/A'}\n`;
-                msg += `*Contact No:* ${details['Contact No'] || 'N/A'}\n`;
-                msg += `*Total Subs:* ${p.total} | *Live:* ${p.live === 'Error' ? '⚠️ ERROR' : p.live} (${percent})\n`;
-                msg += `*District:* ${details['District'] || 'N/A'}\n`;
-                msg += `*Stack VLAN:* ${details['Stack VLAN'] || 'N/A'}\n`;
-                msg += `*Customer VLAN:* ${details['Customer VLAN'] || 'N/A'}\n`;
-                msg += `*BNG:* ${details['BNG'] || 'N/A'}\n`;
-                msg += `*Primary Port:* ${details['Primary Port'] || 'N/A'}\n`;
-                msg += `*Status:* Link may be down\n\n`;
-                msg += `----------------------------\n\n`;
-            });
-
-            await sendAnpAlert(msg);
-        }
-
-        // Log if all healthy
-        if (!recovered.length && !stillDown.length && !newDown.length) {
+        if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
             console.log("ANP Checker: All partners healthy.");
         }
-
     } catch (error) {
-        console.error("ANP Check CRITICAL ERROR:", error.message);
-        await sendAnpAlert(`🤖 *Bot Error: ANP Check Failed*\n\nError: ${error.message}`);
+        console.error("❌ ANP Check CRITICAL ERROR:", error.message);
+        await sendAnpAlert(`🤖 *Bot Error: ANP Check Failed*\n\nError: _${error.message}_`);
     }
 };
 
