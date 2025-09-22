@@ -2610,7 +2610,7 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
     try {
         const filePath = path.join(__dirname, filename);
         if (!fs.existsSync(filePath)) {
-            console.warn(`⚠️ ANP Checker WARNING: Excel file '${filename}' not found.`);
+            console.warn(`ANP Checker WARNING: Excel file '${filename}' not found.`);
             return (partnerLiveDetailsCache = {});
         }
         const workbook = XLSX.readFile(filePath);
@@ -2620,7 +2620,7 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
             const partnerId = row['Partner ID'] ? String(row['Partner ID']).trim() : null;
             if (partnerId) detailsDict[partnerId] = row;
         });
-        console.log(`✅ ANP Checker: Loaded details for ${Object.keys(detailsDict).length} partners.`);
+        console.log(`ANP Checker: Loaded details for ${Object.keys(detailsDict).length} partners.`);
         return (partnerLiveDetailsCache = detailsDict);
     } catch (e) {
         console.error(`❌ ANP Checker ERROR: Failed to load Excel file '${filename}'.`);
@@ -2676,33 +2676,36 @@ const runAnpStatusCheckAndNotify = async () => {
             await sendAnpAlert(`🤖 *Bot Alert: ANP Still Down*\n\n${stillDownAlerts.join('\n')}`);
         }
         if (newAlerts.length > 0) {
-            let msg = `🤖 *Bot Detected: ANP Down*\n\nFound *${newAlerts.length}* new problem(s):\n`;
-            newAlerts.sort((a, b) => a.name.localeCompare(b.name)).forEach(p => {
+            newAlerts.sort((a, b) => a.name.localeCompare(b.name));
+            for (const p of newAlerts) {
                 const details = extraDetails[p.id] || {};
-                const percent = p.total_subs > 0 ? `(${(p.live_subs === 'Error' ? 0 : p.live_subs) / p.total_subs * 100}.toFixed(1)}%)` : '';
-                msg += `\n-------------------------------------\n` +
-                    `*The ANP maybe facing a link down / fiber break. Please check.*\n\n` +
-                    `*ANP Name:* ${p.name}\n` +
-                    `*ANP ID:* ${p.id}\n` +
-                    `*Total Subs:* ${p.total_subs}\n` +
-                    `*Active Subs:* ${p.live_subs === 'Error' ? '⚠️ ERROR' : `${p.live_subs}`} ${percent}\n` +
-                    `*JH Code:* ${details['JH Code'] || 'N/A'}\n` +
-                    `*District:* ${details['District'] || 'N/A'}\n` +
-                    `*Contact Name:* ${details['Contact Name'] || 'N/A'}\n` +
-                    `*Contact No:* ${details['Contact No'] || 'N/A'}\n` +
-                    `*Stack VLAN:* ${details['Stack VLAN'] || 'N/A'}\n` +
-                    `*Customer VLAN:* ${details['Customer VLAN'] || 'N/A'}\n` +
-                    `*Primary Port:* ${details['Primary Port'] || 'N/A'}\n` +
-                    `*Backup Port:* ${details['Backup Port'] || 'N/A'}\n` +
-                    `*BNG:* ${details['BNG'] || 'N/A'}\n`;
-            });
-            await sendAnpAlert(msg);
+
+                let msg = `🤖 *Bot Detected: ANP Down*\n\n`;
+                msg += `*ANP Name:* ${p.name}\n`;
+                msg += `*ANP ID:* ${p.id}\n`;
+                msg += `*Total Subscriber:* ${p.total_subs}\n`;
+                msg += `*Currently Online:* ${p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs}\n`;
+                msg += `*JH Code:* ${details['JH Code'] || 'N/A'}\n`;
+                msg += `*District:* ${details['District'] || 'N/A'}\n`;
+                msg += `*Contact Name:* ${details['Contact Name'] || 'N/A'}\n`;
+                msg += `*Contact No:* ${details['Contact No'] || 'N/A'}\n`;
+                msg += `*Stack VLAN:* ${details['Stack VLAN'] || 'N/A'}\n`;
+                msg += `*Customer VLAN:* ${details['Customer VLAN'] || 'N/A'}\n`;
+                msg += `*Primary Port:* ${details['Primary Port'] || 'N/A'}\n`;
+                msg += `*Backup Port:* ${details['Backup Port'] || 'N/A'}\n`;
+                msg += `*BNG:* ${details['BNG'] || 'N/A'}\n`;
+                msg += `*Status:* Link may be down\n\n`;
+                msg += `*The ANP may be facing a link down issue.*`;
+
+                await sendAnpAlert(msg);
+                await new Promise(resolve => setTimeout(resolve, 500)); // 1 second delay between messages
+            }
         }
         if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
             console.log("ANP Checker: All partners healthy.");
         }
     } catch (error) {
-        console.error("❌ ANP Check CRITICAL ERROR:", error.message);
+        console.error("ANP Check CRITICAL ERROR:", error.message);
         await sendAnpAlert(`🤖 *Bot Error: ANP Check Failed*\n\nError: _${error.message}_`);
     }
 };
