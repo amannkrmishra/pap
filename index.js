@@ -55,11 +55,8 @@ const XLSX = require('xlsx');
 const userSessions = new Map();
 let cachedSessionCookies = null;
 let partnerMappings = null;
-const COOKIE_TTL = 360000; // 6:00 min
-const REFRESH_THRESHOLD = 288000; // 4:48 min
-let lastAuthTime = 0;
-let refreshingPromise = null;
-let autoRefreshTimeout = null;
+const COOKIE_CLEANUP_TIME = 330000; // 5 min 30 sec
+let cookieCleanupTimeout = null;
 let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
@@ -321,39 +318,6 @@ const loadExcelData = () => {
     }
 };
 
-const scheduleAutoRefresh = () => {
-    if (autoRefreshTimeout) clearTimeout(autoRefreshTimeout);
-    const timeSinceAuth = Date.now() - lastAuthTime;
-    const delay = Math.max(REFRESH_THRESHOLD - timeSinceAuth, 0);
-
-    autoRefreshTimeout = setTimeout(() => {
-        if (!refreshingPromise) {
-            refreshingPromise = refreshCookies();
-        }
-    }, delay);
-};
-
-const refreshCookies = async () => {
-    try {
-        const {
-            railwireCookie,
-            ciSessionCookie
-        } = await authenticate('admin', 'Pass@123');
-        cachedSessionCookies = {
-            railwireCookie,
-            ciSessionCookie
-        };
-        lastAuthTime = Date.now();
-        scheduleAutoRefresh();
-        return cachedSessionCookies;
-    } catch (err) {
-        console.error('Cookie refresh failed:', err.message);
-        return null;
-    } finally {
-        refreshingPromise = null;
-    }
-};
-
 // Handles interactive subscriber detail updates
 const handleSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
@@ -513,25 +477,36 @@ const handleBulkSubscriberUpdate = async (message) => {
     await chat.sendMessage("✅ Bulk update process finished.");
 };
 
-
 const getCookies = async () => {
-    const now = Date.now();
-    const age = now - lastAuthTime;
-
-    if (cachedSessionCookies && age < COOKIE_TTL) {
+    if (cachedSessionCookies) {
         return cachedSessionCookies;
     }
 
-    if (!refreshingPromise) {
-        refreshingPromise = refreshCookies().catch(err => {
-            console.error('Error during refreshCookies():', err.message);
-            return null;
-        });
+    try {
+        const {
+            railwireCookie,
+            ciSessionCookie
+        } = await authenticate('admin', 'Pass@123');
+        cachedSessionCookies = {
+            railwireCookie,
+            ciSessionCookie
+        };
+        
+        // Clear any existing cleanup timeout
+        if (cookieCleanupTimeout) clearTimeout(cookieCleanupTimeout);
+        
+        // Set cleanup timeout for 5 min 30 sec
+        cookieCleanupTimeout = setTimeout(() => {
+            cachedSessionCookies = null;
+            cookieCleanupTimeout = null;
+        }, COOKIE_CLEANUP_TIME);
+        
+        return cachedSessionCookies;
+    } catch (err) {
+        console.error('Authentication failed:', err.message);
+        return null;
     }
-
-    return refreshingPromise;
 };
-
 
 
 const baseURL = 'https://jh.railwire.co.in';
@@ -806,7 +781,7 @@ const DeactivateID = async (userData, cookies) => {
     try {
         const response = await axios.post('https://jh.railwire.co.in/billcntl/update_expiry', payload, config);
 
-        console.log(`ID status: ${response.data.STATUS}`);
+        console.log(`Account activated / deactivated status: ${response.data.STATUS}`);
         return response.data.STATUS === 'OK';
     } catch (error) {
         console.error('Deactivate error:', error.message);
@@ -864,7 +839,6 @@ const waitForReply = async (originalMessage) => {
 
 const downloadAndSendSubscriberCSV = async (chat) => {
     try {
-        console.log("Attempting to download daily subscriber CSV...");
         const cookies = await getCookies();
         if (!cookies) throw new Error("Authentication failed for CSV download.");
 
@@ -896,7 +870,7 @@ const downloadAndSendSubscriberCSV = async (chat) => {
         });
 
         fs.unlinkSync(filePath); // Clean up the file after sending
-        console.log(`Successfully sent daily report to ${chat.name} and cleaned up file.`);
+        console.log(`Daily report to ${chat.name}.`);
 
     } catch (error) {
         console.error('Error in downloadAndSendSubscriberCSV:', error.message);
@@ -2611,7 +2585,6 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
     try {
         const filePath = path.join(__dirname, filename);
         if (!fs.existsSync(filePath)) {
-            console.warn(`ANP Checker WARNING: Excel file '${filename}' not found.`);
             return (partnerLiveDetailsCache = {});
         }
         const workbook = XLSX.readFile(filePath);
@@ -2621,7 +2594,6 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
             const partnerId = row['Partner ID'] ? String(row['Partner ID']).trim() : null;
             if (partnerId) detailsDict[partnerId] = row;
         });
-        console.log(`ANP Checker: Loaded details for ${Object.keys(detailsDict).length} partners.`);
         return (partnerLiveDetailsCache = detailsDict);
     } catch (e) {
         console.error(`ANP Checker ERROR: Failed to load Excel file '${filename}'.`);
@@ -2682,7 +2654,7 @@ const runAnpStatusCheckAndNotify = async () => {
                 const details = extraDetails[p.id] || {};
 
                 let msg = `*Detected: ANP Link Down*\n\n`;
-                msg += `*Status:* Link maybe down\n\n`;
+                msg += `*Status:* Link down hogya hai shayad.\n\n`;
                 msg += `*ANP Name:* ${p.name}\n`;
                 msg += `*Total Subscriber:* ${p.total_subs}\n`;
                 msg += `*Currently Online:* ${p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs}\n`;
@@ -2695,7 +2667,7 @@ const runAnpStatusCheckAndNotify = async () => {
                 msg += `*BNG:* ${details['BNG'] || 'N/A'}\n`;
 
                 await sendAnpAlert(msg);
-                await new Promise(resolve => setTimeout(resolve, 500)); // 1 second delay between messages
+                await new Promise(resolve => setTimeout(resolve, 100)); // 1 second delay between messages
             }
         }
         if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
