@@ -60,6 +60,7 @@ let cookieCleanupTimeout = null;
 let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
+let lastStillDownReportTime = 0;
 
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
@@ -79,7 +80,7 @@ const downPartnersState = new Map();
 
 const sendAnpAlert = async (message) => {
     // Send to Aman
-    await client.sendMessage(ANP_CONFIG.TARGET_ID, message);
+ //   await client.sendMessage(ANP_CONFIG.TARGET_ID, message);
 
     // Send to Daily Count group
     const chats = await client.getChats();
@@ -2636,25 +2637,23 @@ const runAnpStatusCheckAndNotify = async () => {
             await sendAnpAlert(msg);
         }
         if (stillDownAlerts.length > 0) {
-            await sendAnpAlert(`*Alert: ANP Still Down Report*\n\n${stillDownAlerts.join('\n')}`);
+            const ONE_HOUR_MS = 60 * 60 * 1000;
+            if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
+                await sendAnpAlert(`*Alert: ANP Still Down Report*\n\n${stillDownAlerts.join('\n')}`);
+                lastStillDownReportTime = Date.now();
+            }
         }
         if (newAlerts.length > 0) {
             newAlerts.sort((a, b) => a.name.localeCompare(b.name));
             for (const p of newAlerts) {
                 const details = extraDetails[p.id] || {};
-
-                let msg = `*Detected: ANP Link Down*\n\n`;
-                msg += `*Status:* Link down hogya hai shayad.\n\n`;
-                msg += `*District:* ${details['District'] || 'N/A'}\n`;
-                msg += `*ANP Name:* ${p.name}\n`;
-                msg += `*Total Subscriber:* ${p.total_subs}\n`;
-                msg += `*Currently Online:* ${p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs}\n`;
-                msg += `*JH Code:* ${details['JH Code'] || 'N/A'}\n`;
-                msg += `*Contact No:* ${details['Contact No'] || 'N/A'}\n`;
-                msg += `*Stack VLAN:* ${details['Stack VLAN'] || 'N/A'}\n`;
-                msg += `*Customer VLAN:* ${details['Customer VLAN'] || 'N/A'}\n`;
-                msg += `*Primary Port:* ${details['Primary Port'] || 'N/A'}\n`;
-                msg += `*BNG:* ${details['BNG'] || 'N/A'}\n`;
+                const liveSubsDisplay = p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs;
+                let msg = `*ANP Link Down*\n\n` +
+                    `*${p.name}* (${details['District'] || 'N/A'})\n` +
+                    `*Subs:* ${liveSubsDisplay} / ${p.total_subs}\n` +
+                    `*Contact:* ${details['Contact No'] || 'N/A'}\n` +
+                    `*VLAN (S/C):* ${details['Stack VLAN'] || 'N/A'} / ${details['Customer VLAN'] || 'N/A'}\n` +
+                    `*Tech:* ${details['JH Code'] || 'N/A'} | Port: ${details['Primary Port'] || 'N/A'} | BNG: ${details['BNG'] || 'N/A'}`;
 
                 await sendAnpAlert(msg);
                 await new Promise(resolve => setTimeout(resolve, 100)); // 1 second delay between messages
