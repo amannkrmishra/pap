@@ -66,7 +66,7 @@ const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
     THRESHOLD_PERCENTAGE: 6, // Changed from THRESHOLD
     TARGET_ID: '916200493605@c.us',
-    GROUP_NAME: 'Daily Count',
+    GROUP_NAME: 'Super Bot - LightWave',
     EXCEL_FILE_NAME: 'PartnerLive.xlsx', // Added this
     IGNORED_PARTNER_IDS: new Set([
         '3474487439', '5283639869', '2568065682', '2425852224', '6378518993',
@@ -2632,14 +2632,14 @@ const runAnpStatusCheckAndNotify = async () => {
         }
 
         if (recoveredPartners.length > 0) {
-            let msg = `*Detected: ANP Link UP*\n\nThe following are back online:\n`;
+            let msg = `*Detected: ANP Link UP*\n\n`;
             recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*` });
             await sendAnpAlert(msg);
         }
         if (stillDownAlerts.length > 0) {
             const ONE_HOUR_MS = 60 * 60 * 1000;
             if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
-                await sendAnpAlert(`*Alert: ANP Still Down Report*\n\n${stillDownAlerts.join('\n')}`);
+                await sendAnpAlert(`*ANP Still Down Report*\n\n${stillDownAlerts.join('\n')}`);
                 lastStillDownReportTime = Date.now();
             }
         }
@@ -2648,12 +2648,14 @@ const runAnpStatusCheckAndNotify = async () => {
             for (const p of newAlerts) {
                 const details = extraDetails[p.id] || {};
                 const liveSubsDisplay = p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs;
-                let msg = `*ANP Link Down*\n\n` +
+                let msg = `*Detected: ANP Link Down*\n\n` +
                     `*${p.name}* (${details['District'] || 'N/A'})\n` +
                     `*Subs:* ${liveSubsDisplay} / ${p.total_subs}\n` +
                     `*Contact:* ${details['Contact No'] || 'N/A'}\n` +
                     `*VLAN (S/C):* ${details['Stack VLAN'] || 'N/A'} / ${details['Customer VLAN'] || 'N/A'}\n` +
-                    `*Tech:* ${details['JH Code'] || 'N/A'} | Port: ${details['Primary Port'] || 'N/A'} | BNG: ${details['BNG'] || 'N/A'}`;
+                    `*Code:* ${details['JH Code'] || 'N/A'}\n` +
+                    `*Port:* ${details['Primary Port'] || 'N/A'}\n` +
+                    `*BNG:* ${details['BNG'] || 'N/A'}`;
 
                 await sendAnpAlert(msg);
                 await new Promise(resolve => setTimeout(resolve, 100)); // 1 second delay between messages
@@ -2664,7 +2666,6 @@ const runAnpStatusCheckAndNotify = async () => {
         }
     } catch (error) {
         console.error("ANP Check CRITICAL ERROR:", error.message);
-        await sendAnpAlert(`🤖 *Bot Error: ANP Check Failed*\n\nError: _${error.message}_`);
     }
 };
 
