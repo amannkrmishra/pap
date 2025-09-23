@@ -62,13 +62,27 @@ let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
+let batchProcessingInProgress = false;
+const BATCH_CONFIG = {
+    CONCURRENT_REQUESTS: 25,
+    EXCEL_FILENAME: 'User.xlsx',
+    LOG_FILE_PATH: path.resolve(__dirname, 'batch_logs.txt')
+};
+
+const logBatchResponse = (username, response) => {
+    const timestamp = new Date().toISOString();
+    const logEntry = `${timestamp} | ${username} >>> ${response}\r\n`;
+    fs.appendFile(BATCH_CONFIG.LOG_FILE_PATH, logEntry, err => {
+        if (err) console.error('Failed to write batch log:', err);
+    });
+};
 
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
-    THRESHOLD_PERCENTAGE: 6, // Changed from THRESHOLD
+    THRESHOLD_PERCENTAGE: 2,
     TARGET_ID: '916200493605@c.us',
     GROUP_NAME: 'Super Bot - LightWave',
-    EXCEL_FILE_NAME: 'PartnerLive.xlsx', // Added this
+    EXCEL_FILE_NAME: 'PartnerLive.xlsx',
     IGNORED_PARTNER_IDS: new Set([
         '3474487439', '5283639869', '2568065682', '2425852224', '6378518993',
         '8878892435', '6834570680', '6195650370', '6933249503', '5950839426',
@@ -80,8 +94,6 @@ const ANP_CONFIG = {
 const downPartnersState = new Map();
 
 const sendAnpAlert = async (message) => {
-    // Send to Aman
- //   await client.sendMessage(ANP_CONFIG.TARGET_ID, message);
 
     // Send to Daily Count group
     const chats = await client.getChats();
@@ -779,6 +791,230 @@ async function fetchUserDataFromPortal(userCode) {
     } : null;
 }
 
+const batchResetSessions = async () => {
+    if (batchProcessingInProgress) {
+        console.log('Batch processing already in progress - skipping');
+        return;
+    }
+
+    batchProcessingInProgress = true;
+    console.log('Starting batch session reset...');
+
+    try {
+        // Read Excel file
+        const filePath = path.resolve(__dirname, BATCH_CONFIG.EXCEL_FILENAME);
+        if (!fs.existsSync(filePath)) {
+            console.error(`File '${BATCH_CONFIG.EXCEL_FILENAME}' not found`);
+            return;
+        }
+
+        const workbook = XLSX.readFile(filePath);
+        const jsonData = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1 });
+        const userList = jsonData.slice(1).map(row => row[0]).filter(username => username?.trim());
+
+        if (userList.length === 0) {
+            console.error('No valid usernames found in Excel file');
+            return;
+        }
+
+        // Get cookies and process users
+        const cookies = await getCookies();
+        if (!cookies) {
+            console.error('Authentication failed');
+            return;
+        }
+
+        let successCount = 0;
+        let failCount = 0;
+        let failedUsers = []; // Track failed users for retry
+
+        // Clear previous log file
+        if (fs.existsSync(BATCH_CONFIG.LOG_FILE_PATH)) {
+            fs.unlinkSync(BATCH_CONFIG.LOG_FILE_PATH);
+        }
+
+        // Add header to log file
+        logBatchResponse('BATCH_START', `Starting batch processing of ${userList.length} users at ${new Date().toISOString()}`);
+
+        // Process in batches with retry logic
+        let currentCookies = cookies;
+        let authRefreshInProgress = false;
+
+        for (let i = 0; i < userList.length; i += BATCH_CONFIG.CONCURRENT_REQUESTS) {
+            const batch = userList.slice(i, i + BATCH_CONFIG.CONCURRENT_REQUESTS);
+
+            await Promise.all(batch.map(async (username) => {
+                let retryCount = 0;
+                const maxRetries = 2;
+
+                while (retryCount <= maxRetries) {
+                    try {
+                        const result = await resetSession({ Username: username }, currentCookies);
+
+                        // Check for session expiry indicators
+                        if (result === 'ERROR' && retryCount < maxRetries) {
+                            // Wait if another thread is already refreshing auth
+                            while (authRefreshInProgress) {
+                                await new Promise(resolve => setTimeout(resolve, 100));
+                            }
+
+                            // Try with current cookies first (might have been refreshed by another thread)
+                            if (retryCount === 0) {
+                                retryCount++;
+                                continue;
+                            }
+
+                            // If still failing, refresh cookies (only one thread at a time)
+                            if (!authRefreshInProgress) {
+                                authRefreshInProgress = true;
+                                try {
+                                    console.log(`Refreshing auth due to ${username} failure...`);
+                                    const newCookies = await getCookies();
+                                    if (newCookies) {
+                                        currentCookies = newCookies;
+                                    } else {
+                                        throw new Error('Re-authentication failed');
+                                    }
+                                } finally {
+                                    authRefreshInProgress = false;
+                                }
+                            }
+                            retryCount++;
+                            continue;
+                        }
+
+                        if (result === 'SUCCESS' || result === 'NOT_ACTIVE') {
+                            successCount++;
+                            logBatchResponse(username, `SUCCESS: ${result}`);
+                        } else {
+                            failCount++;
+                            failedUsers.push(username); // Add to failed list
+                            logBatchResponse(username, `FAILED: ${result}`);
+                        }
+                        break;
+
+                    } catch (error) {
+                        if (retryCount < maxRetries) {
+                            logBatchResponse(username, `RETRY_${retryCount + 1}: ${error.message}`);
+                            retryCount++;
+                            await new Promise(resolve => setTimeout(resolve, 100)); // Small delay before retry
+                        } else {
+                            failCount++;
+                            failedUsers.push(username); // Add to failed list
+                            logBatchResponse(username, `RETRY_EXHAUSTED: Failed after ${maxRetries + 1} attempts - ${error.message}`);
+                            break;
+                        }
+                    }
+                }
+            }));
+
+            // Small delay between batches
+            if (i + BATCH_CONFIG.CONCURRENT_REQUESTS < userList.length) {
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+        }
+
+        // Second Pass: Retry failed users
+        if (failedUsers.length > 0) {
+            logBatchResponse('RETRY_PASS', `Starting retry pass for ${failedUsers.length} failed users`);
+            console.log(`Starting retry pass for ${failedUsers.length} failed users...`);
+
+            // Get fresh cookies for retry pass
+            const retryCookies = await getCookies();
+            if (retryCookies) {
+                currentCookies = retryCookies;
+
+                let retrySuccessCount = 0;
+                let finalFailCount = 0;
+
+                // Process failed users in smaller batches (5 concurrent for retry)
+                const retryBatchSize = Math.min(5, BATCH_CONFIG.CONCURRENT_REQUESTS);
+
+                for (let i = 0; i < failedUsers.length; i += retryBatchSize) {
+                    const retryBatch = failedUsers.slice(i, i + retryBatchSize);
+
+                    await Promise.all(retryBatch.map(async (username) => {
+                        try {
+                            const result = await resetSession({ Username: username }, currentCookies);
+
+                            if (result === 'SUCCESS' || result === 'NOT_ACTIVE') {
+                                retrySuccessCount++;
+                                logBatchResponse(username, `RETRY_PASS_SUCCESS: ${result}`);
+                            } else {
+                                finalFailCount++;
+                                logBatchResponse(username, `RETRY_PASS_FAILED: ${result}`);
+                            }
+                        } catch (error) {
+                            finalFailCount++;
+                            logBatchResponse(username, `RETRY_PASS_ERROR: ${error.message}`);
+                        }
+                    }));
+
+                    // Delay between retry batches
+                    if (i + retryBatchSize < failedUsers.length) {
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
+                }
+
+                // Update final counts
+                successCount += retrySuccessCount;
+                failCount = finalFailCount;
+
+                logBatchResponse('RETRY_COMPLETE', `Retry pass completed: ${retrySuccessCount} recovered, ${finalFailCount} still failed`);
+                console.log(`Retry pass completed: ${retrySuccessCount} recovered, ${finalFailCount} still failed`);
+            } else {
+                logBatchResponse('RETRY_AUTH_FAILED', 'Could not get fresh cookies for retry pass');
+                console.log('Could not get fresh cookies for retry pass');
+            }
+        }
+
+        // Add summary to log file
+        logBatchResponse('BATCH_COMPLETE', `Final results: ${successCount} success, ${failCount} failed`);
+
+        console.log(`Batch complete: ${successCount} success, ${failCount} failed`);
+
+        // Send notification with log file
+        const summaryMessage = `*Batch Session Reset Complete*\n\n` +
+            `*Total:* ${userList.length}\n*Success:* ${successCount}\n*Failed:* ${failCount}`;
+
+        const targetIds = ['916200493605@c.us']; // Aman
+
+        try {
+            // Check if log file exists and send it
+            if (fs.existsSync(BATCH_CONFIG.LOG_FILE_PATH)) {
+                const logMedia = MessageMedia.fromFilePath(BATCH_CONFIG.LOG_FILE_PATH);
+
+                for (const id of targetIds) {
+                    try {
+                        await client.sendMessage(id, summaryMessage);
+                        await client.sendMessage(id, logMedia, {
+                            caption: 'Batch Processing Log File'
+                        });
+                    } catch (err) {
+                        console.error(`Failed to send to ${id}:`, err.message);
+                    }
+                }
+            } else {
+                // If no log file, send just the summary
+                for (const id of targetIds) {
+                    try {
+                        await client.sendMessage(id, summaryMessage);
+                    } catch (err) {
+                        console.error(`Failed to send to ${id}:`, err.message);
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('Failed to send notifications:', err.message);
+        }
+
+    } catch (error) {
+        console.error('Batch processing error:', error.message);
+    } finally {
+        batchProcessingInProgress = false;
+    }
+};
+
 const resetSession = async (userData, cookies) => {
     const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
     const config = {
@@ -879,48 +1115,6 @@ const waitForReply = async (originalMessage) => {
     });
 };
 
-const downloadAndSendSubscriberCSV = async (chat) => {
-    try {
-        const cookies = await getCookies();
-        if (!cookies) throw new Error("Authentication failed for CSV download.");
-
-        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-
-        const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
-            headers: {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Cookie': cookieString,
-                'Sec-Fetch-Dest': 'document',
-            },
-            responseType: 'arraybuffer' // Crucial for file downloads
-        });
-
-        if (response.status !== 200) {
-            throw new Error(`Server responded with status ${response.status}`);
-        }
-
-        const today = new Date();
-        const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
-        const filePath = path.join(__dirname, fileName);
-
-        fs.writeFileSync(filePath, response.data);
-
-        const media = MessageMedia.fromFilePath(filePath);
-        await chat.sendMessage(media, {
-            caption: 'Daily Subscriber Report'
-        });
-
-        fs.unlinkSync(filePath); // Clean up the file after sending
-        console.log(`Daily report to ${chat.name}.`);
-
-    } catch (error) {
-        console.error('Error in downloadAndSendSubscriberCSV:', error.message);
-        await chat.sendMessage('❌ Failed to download the daily subscriber report.');
-    }
-};
-
-
 const handlePlanChange = async (message) => {
     const chat = await message.getChat();
     const messageBody = message.body; // Use original case for usernames
@@ -937,21 +1131,19 @@ const handlePlanChange = async (message) => {
 
     // 3. Validate the input with clear rules
     if (usernames.length === 0 && subscriberIds.length > 0) {
-        return await chat.sendMessage("❌ Please provide a username not a subscriber ID.");
+        return await chat.sendMessage("Please provide a username not a subscriber ID.");
     }
     if (usernames.length === 0) {
-        return await chat.sendMessage("❌ Username not found in the message. send like this: planchange jh.xyz.username 800829");
+        return await chat.sendMessage("Username not found in the message. send like this: planchange jh.xyz.username 800829");
     }
     if (potentialPackageIds.length === 0) {
-        return await chat.sendMessage("❌ Please provide a 3 to 6-digit Package ID in your message.");
+        return await chat.sendMessage("Please provide a 3 to 6-digit Package ID in your message.");
     }
     if (potentialPackageIds.length > 1) {
-        return await chat.sendMessage("❌ Please provide only one Package ID at a time to apply to all users.");
+        return await chat.sendMessage("Please provide only one Package ID at a time to apply to all users.");
     }
 
     const desiredPkgId = potentialPackageIds[0];
-    await chat.sendMessage(`⏳ Processing plan change for ${usernames.length} user(s) to Package ID: *${desiredPkgId}*...`);
-
     const cookies = await getCookies();
     if (!cookies) {
         return await chat.sendMessage("Authentication failed. Cannot proceed with plan change.");
@@ -2476,6 +2668,13 @@ const handleIncomingMessage = async (message) => {
         await message.reply('Check completed');
         return;
     }
+
+    if (messageBodyNoSpaces.includes('batchreset')) {
+        await message.reply('Starting batch session reset...');
+        await batchResetSessions();
+        return;
+    }
+
     if (messageBodyNoSpaces.includes('anpupdate')) {
         await handleAnpUpdate(message);
         return;
@@ -2526,25 +2725,88 @@ client.on('ready', () => {
             const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
 
             const targetIds = [
-                '917004501523@c.us', // Rakesh
-                '916200493605@c.us' // Aman
+                '917004501523@c.us', // Rakesh Sir
+                '916200493605@c.us'  // Aman
             ];
 
+            // Download CSV once and store the media object
+            let csvMedia = null;
+            try {
+                const cookies = await getCookies();
+                if (!cookies) throw new Error("Authentication failed for CSV download.");
+
+                const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+
+                const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
+                    headers: {
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Cookie': cookieString,
+                        'Sec-Fetch-Dest': 'document',
+                    },
+                    responseType: 'arraybuffer'
+                });
+
+                if (response.status !== 200) {
+                    throw new Error(`Server responded with status ${response.status}`);
+                }
+
+                const today = new Date();
+                const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
+                const filePath = path.join(__dirname, fileName);
+
+                // Write file once
+                fs.writeFileSync(filePath, response.data);
+                csvMedia = MessageMedia.fromFilePath(filePath);
+
+                console.log('CSV downloaded and prepared for distribution');
+            } catch (error) {
+                console.error('Error downloading CSV:', error.message);
+            }
+
+            // Send to all recipients
             for (const id of targetIds) {
                 try {
                     const chat = await client.getChatById(id);
                     await chat.sendMessage(message);
-                    await downloadAndSendSubscriberCSV(chat);
+
+                    if (csvMedia) {
+                        await chat.sendMessage(csvMedia, {
+                            caption: 'Daily Subscriber Report'
+                        });
+                    } else {
+                        await chat.sendMessage('❌ Failed to download the daily subscriber report.');
+                    }
                 } catch (err) {
                     console.error(`Failed to send report to ID ${id}:`, err.message);
                 }
             }
+
+            // Clean up the temporary file after sending to all recipients
+            if (csvMedia) {
+                try {
+                    const today = new Date();
+                    const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
+                    const filePath = path.join(__dirname, fileName);
+                    fs.unlinkSync(filePath);
+                    console.log('Temporary CSV file cleaned up');
+                } catch (cleanupError) {
+                    console.error('Error cleaning up CSV file:', cleanupError.message);
+                }
+            }
+
         } catch (error) {
             console.error('Scheduled daily task failed:', error.message);
         }
     };
 
-    // This schedule runs once a day at 11:59 PM.
+    cron.schedule('5 0 * * *', async () => {
+        console.log('Starting scheduled batch session reset...');
+        await batchResetSessions();
+    }, {
+        timezone: "Asia/Kolkata"
+    });
+
     cron.schedule('59 23 * * *', scheduledTask, {
         timezone: "Asia/Kolkata"
     });
@@ -2552,7 +2814,6 @@ client.on('ready', () => {
     cron.schedule('*/15 * * * *', runAnpStatusCheckAndNotify, {
         timezone: "Asia/Kolkata"
     });
-
     console.log('WhatsApp bot ready to use!!');
 });
 
@@ -2579,20 +2840,22 @@ const formatDuration = (ms) => {
 
 const getNmsSession = async (billingCookies) => {
     const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
-    const { data } = await axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } });
+    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
+
     const $ = cheerio.load(data);
     const nmsUsername = $('#srvs_redi input[name="username"]').val();
     const nmsPassword = $('#srvs_redi input[name="password"]').val();
     if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
+    const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
 
-    const { headers } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 });
     if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
     return headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
 };
 
 const getAllPartners = async (billingCookies) => {
     const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
-    const { data } = await axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`, { headers: { 'Cookie': billingCookieString, 'Referer': `${baseURL}/billcntl/all_sms_templates` } });
+    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`, { headers: { 'Cookie': billingCookieString, 'Referer': `${baseURL}/billcntl/all_sms_templates` } }));
+
     const $ = cheerio.load(data);
     const partners = [];
     $('table tbody tr').each((i, elem) => {
@@ -2609,11 +2872,12 @@ const getAllPartners = async (billingCookies) => {
 
 const getLiveOnlineCount = async (partnerId, nmsCookie) => {
     try {
-        const { data } = await axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`, new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': nmsCookie, 'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php` }, timeout: 15000 });
+        const { data } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`, new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': nmsCookie, 'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php` }, timeout: 15000 }));
+
         const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
         return match ? parseInt(match[1], 10) : null;
     } catch (error) {
-        console.error(`ANP Checker: Error for ${partnerId}: ${error.message}`);
+        console.error(`ANP Checker: Failed to get live count for ${partnerId} after multiple retries: ${error.message}`);
         return 'Error';
     }
 };
@@ -2705,7 +2969,7 @@ const runAnpStatusCheckAndNotify = async () => {
                     `*BNG:* ${details['BNG'] || 'N/A'}`;
 
                 await sendAnpAlert(msg);
-                await new Promise(resolve => setTimeout(resolve, 100)); // 1 second delay between messages
+                await new Promise(resolve => setTimeout(resolve, 100));
             }
         }
         if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
