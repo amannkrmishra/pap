@@ -1980,7 +1980,7 @@ const processAllForms = async (cookies, originalMessage) => {
 
         if (!isComplete) {
             console.log('Fetching Remaining Application Forms..');
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 5 seconds before refreshing
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before refreshing
         }
     }
 
@@ -2333,149 +2333,139 @@ const handleSubmittedForm = async (link, oltabid, cookies, username, originalMes
     }
 };
 
-
 const handleIncomingMessage = async (message) => {
     const chat = await message.getChat();
     if (chat.isGroup && chat.name === 'Railtel & MSP team Jharkhand') {
-        console.log('MSP group messages ignoring!!');
         return;
     }
 
     const userIdentifier = getUserIdentifier(message);
     const messageBody = message.body.toLowerCase().trim();
+    const messageBodyNoSpaces = messageBody.replace(/\s/g, '');
 
     console.log(`User Detail: ${userIdentifier}`);
     console.log(`Message: ${messageBody}`);
-    const messageBodyNoSpaces = messageBody.replace(/\s/g, '');
 
-    // Username/ID scanning logic
-    const SESSION_TIMEOUT_MS = 600000; // 10 minutes
-    const ACCUMULATION_WINDOW_MS = 120000; // 2 minutes
-
-    // More specific pattern matching
+    const SESSION_TIMEOUT_MS = 300000;
+    const EXECUTION_DELAY_MS = 3000;
     const codePattern = /jh(\.\w+){2,}/gi;
     const subscriberIdPattern = /(?<!\d)\b\d{4,6}\b(?!\d)/g;
-
     const codeMatches = messageBody.match(codePattern) || [];
     const subscriberIdMatches = messageBody.match(subscriberIdPattern) || [];
-    const allUserCodesInThisMessage = [...new Set([...codeMatches, ...subscriberIdMatches])].map(c => c.toLowerCase());
+    const codesInThisMessage = [...new Set([...codeMatches, ...subscriberIdMatches])].map(c => c.toLowerCase());
 
-    if (allUserCodesInThisMessage.length > 0) {
-        const now = Date.now();
-        const existingSession = userSessions.get(userIdentifier);
-        let updatedUserCodes = allUserCodesInThisMessage;
+    const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
+    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
+    const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
 
-        if (existingSession && (now - existingSession.lastUpdated < ACCUMULATION_WINDOW_MS)) {
-            updatedUserCodes = [...new Set([...existingSession.userCodes, ...allUserCodesInThisMessage])];
-        }
+    let serviceProvider = null;
+    if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
+    else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
+    else if (/\b(zee5|zee|zee-5)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
 
-        if (existingSession?.timeoutId) clearTimeout(existingSession.timeoutId);
-        const newTimeoutId = setTimeout(() => userSessions.delete(userIdentifier), SESSION_TIMEOUT_MS);
+    const existingSession = userSessions.get(userIdentifier) || { userCodes: [], pendingActions: {} };
 
-        userSessions.set(userIdentifier, {
-            userCodes: updatedUserCodes,
-            lastUpdated: now,
-            timeoutId: newTimeoutId
-        });
+    if (existingSession.abandonmentTimeoutId) clearTimeout(existingSession.abandonmentTimeoutId);
+
+    const combinedUserCodes = [...new Set([...existingSession.userCodes, ...codesInThisMessage])];
+    const combinedActions = { ...existingSession.pendingActions };
+    if (wantsSessionReset) combinedActions.wantsSessionReset = true;
+    if (wantsDeactiveID) combinedActions.wantsDeactiveID = true;
+    if (wantsPasswordReset) combinedActions.wantsPasswordReset = true;
+    if (serviceProvider) combinedActions.serviceProvider = serviceProvider;
+
+    const hasData = combinedUserCodes.length > 0;
+    const hasAction = Object.keys(combinedActions).length > 0;
+
+    const updatedSession = {
+        ...existingSession,
+        userCodes: combinedUserCodes,
+        pendingActions: combinedActions,
+        lastUpdated: Date.now()
+    };
+    userSessions.set(userIdentifier, updatedSession);
+
+    if (hasData && hasAction) {
+        if (updatedSession.executionTimeoutId) clearTimeout(updatedSession.executionTimeoutId);
+
+        const newExecutionTimeoutId = setTimeout(() => {
+            const sessionToProcess = userSessions.get(userIdentifier);
+            if (!sessionToProcess) return;
+
+            if (sessionToProcess.pendingActions.serviceProvider) {
+                userSessions.set(userIdentifier, { ...sessionToProcess, userCode: sessionToProcess.userCodes[0] });
+                processOTTComplaint(message, userIdentifier, sessionToProcess.pendingActions.serviceProvider);
+            } else {
+                processActions(message, userIdentifier,
+                    sessionToProcess.pendingActions.wantsSessionReset,
+                    sessionToProcess.pendingActions.wantsPasswordReset,
+                    sessionToProcess.pendingActions.wantsDeactiveID
+                );
+            }
+        }, EXECUTION_DELAY_MS);
+
+        updatedSession.executionTimeoutId = newExecutionTimeoutId;
+
+    } else {
+        updatedSession.abandonmentTimeoutId = setTimeout(() => userSessions.delete(userIdentifier), SESSION_TIMEOUT_MS);
     }
 
     if (messageBodyNoSpaces.includes('subscount') || messageBodyNoSpaces.includes('subscribercount')) {
         const count = await getSubscriberCount();
         const formattedTime = new Date().toLocaleTimeString('en-US');
-        const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\nTo check anytime type: *subscribercount*`;
+        const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\nTo check anytime type: *subscount*`;
         await message.reply(replyMessage);
         return;
     }
-
     if (messageBody.startsWith('search ')) {
         const searchTerm = message.body.substring(7).trim();
         await handleSubscriberSearch(message, searchTerm);
         return;
     }
-
     if (messageBodyNoSpaces.includes('anpcheck')) {
         await message.reply('🤖 Running ANP status check...');
         await runAnpStatusCheckAndNotify();
         await message.reply('✅ ANP check completed');
         return;
     }
-
     if (messageBodyNoSpaces.includes('anpupdate')) {
         await handleAnpUpdate(message);
         return;
     }
-
     if (messageBodyNoSpaces.includes('subsupdate')) {
         await handleSubscriberUpdate(message);
         return;
     }
-
     if (messageBodyNoSpaces.includes('bulksubupdate')) {
         await handleBulkSubscriberUpdate(message);
         return;
     }
-
     if (messageBodyNoSpaces.includes('ticketupdate')) {
         await handleTicketActivation(message);
         return;
     }
-
     if (messageBodyNoSpaces.includes('checkott')) {
         await checkComplaintStatus(message);
         return;
     }
-
     if (messageBodyNoSpaces.includes('slastart')) {
         await createSLATicket(message);
         return;
     }
-
     if (messageBodyNoSpaces.includes('planchange') || messageBodyNoSpaces.includes('planupdate')) {
         await handlePlanChange(message);
         return;
     }
-
     if (messageBodyNoSpaces.includes('cafupdate')) {
         const cookies = await getCookies();
         if (!cookies) {
             await message.reply('Failed to authenticate. Please try again later.');
             return;
         }
-
         await message.reply('Looking for KYC...');
         const totalProcessed = await processAllForms(cookies, message);
         await message.reply(`Processed + Verified: ${totalProcessed}`);
         return;
-    }
-
-    // Action keywords (These are already flexible using regex)
-    const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
-    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
-    const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
-
-    // Handle OTT (already flexible)
-    let serviceProvider = null;
-    if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
-    else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
-    else if (/\b(zee5|zee|zee-5)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
-
-    if (serviceProvider && userSessions.has(userIdentifier)) {
-        const session = userSessions.get(userIdentifier);
-        if (session.userCodes?.length > 0) {
-            userSessions.set(userIdentifier, {
-                ...session,
-                userCode: session.userCodes[0]
-            });
-            await processOTTComplaint(message, userIdentifier, serviceProvider);
-        }
-        return;
-    }
-
-    // Handle standard actions and clear session afterwards
-    if ((wantsSessionReset || wantsPasswordReset || wantsDeactiveID) && userSessions.has(userIdentifier)) {
-        const session = userSessions.get(userIdentifier);
-        if (session?.timeoutId) clearTimeout(session.timeoutId);
-        await processActions(message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsDeactiveID);
     }
 };
 
@@ -2511,7 +2501,7 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
-    cron.schedule('*/30 * * * *', runAnpStatusCheckAndNotify, {
+    cron.schedule('*/15 * * * *', runAnpStatusCheckAndNotify, {
         timezone: "Asia/Kolkata"
     });
 
@@ -2655,11 +2645,11 @@ const runAnpStatusCheckAndNotify = async () => {
 
                 let msg = `*Detected: ANP Link Down*\n\n`;
                 msg += `*Status:* Link down hogya hai shayad.\n\n`;
+                msg += `*District:* ${details['District'] || 'N/A'}\n`;
                 msg += `*ANP Name:* ${p.name}\n`;
                 msg += `*Total Subscriber:* ${p.total_subs}\n`;
                 msg += `*Currently Online:* ${p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs}\n`;
                 msg += `*JH Code:* ${details['JH Code'] || 'N/A'}\n`;
-                msg += `*District:* ${details['District'] || 'N/A'}\n`;
                 msg += `*Contact No:* ${details['Contact No'] || 'N/A'}\n`;
                 msg += `*Stack VLAN:* ${details['Stack VLAN'] || 'N/A'}\n`;
                 msg += `*Customer VLAN:* ${details['Customer VLAN'] || 'N/A'}\n`;
