@@ -2694,9 +2694,9 @@ const runAnpStatusCheckAndNotify = async () => {
             newAlerts.sort((a, b) => a.name.localeCompare(b.name));
             for (const p of newAlerts) {
                 const details = extraDetails[p.id] || {};
-                const liveSubsDisplay = p.live_subs === 'Error' ? '⚠️ ERROR' : p.live_subs;
+                const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
                 let msg = `*Detected: ANP Link Down*\n\n` +
-                    `*${p.name}* (${details['District'] || 'N/A'})\n` +
+                    `*Name:* ${p.name} (${details['District'] || 'N/A'})\n` +
                     `*Subs:* ${liveSubsDisplay} / ${p.total_subs}\n` +
                     `*Contact:* ${details['Contact No'] || 'N/A'}\n` +
                     `*VLAN (S/C):* ${details['Stack VLAN'] || 'N/A'} / ${details['Customer VLAN'] || 'N/A'}\n` +
