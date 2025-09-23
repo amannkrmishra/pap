@@ -36,6 +36,7 @@ const client = new Client({
     }
 });
 const FormData = require('form-data');
+const sharp = require('sharp');
 const cron = require('node-cron');
 const Tesseract = require('tesseract.js');
 const axios = require('axios');
@@ -154,6 +155,46 @@ const createHeaderMap = (header) => header.reduce((acc, col, index) => {
     return acc;
 }, {});
 
+const extractUsernamesFromImage = async (message) => {
+    if (!message.hasMedia) return [];
+    const media = await message.downloadMedia();
+    if (!media || !media.mimetype.startsWith('image/')) return [];
+
+    try {
+        const imageBuffer = Buffer.from(media.data, 'base64');
+
+        const processedImageBuffer = await sharp(imageBuffer)
+            .greyscale()
+            .normalize()
+            .sharpen()
+            .toBuffer();
+
+        const { data: { text } } = await Tesseract.recognize(
+            processedImageBuffer,
+            'eng'
+        );
+
+        const subscriberIdPattern = /\b\d{5}\b/g;
+        let matches = text.match(subscriberIdPattern) || [];
+
+        if (matches.length > 0) {
+            console.log(`Found Subscriber ID(s): ${matches.join(', ')}`);
+            return [...new Set(matches)];
+        }
+
+        const usernamePattern = /\b(jh\.[a-z0-9\._-]+)\b/gi;
+        matches = text.match(usernamePattern) || [];
+
+        if (matches.length > 0) {
+            console.log(`Found Username(s): ${matches.join(', ')}`);
+        }
+
+        return [...new Set(matches.map(m => m.toLowerCase()))];
+
+    } catch (error) {
+        return [];
+    }
+};
 
 
 const loadAllData = async () => {
@@ -1850,6 +1891,7 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
 
     // Loop through each user code stored in the session
     for (const userCode of userCodes) {
+        try {
         let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
 
         if (fetchedUserData) {
@@ -1895,6 +1937,10 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
         } else {
             console.log(`No user data found for JH code or ID: ${userCode}`);
             await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
+        }
+        } catch (error) {
+            console.error(`CRITICAL ERROR processing ${userCode}:`, error.message);
+            await message.reply(`Could not process *${userCode}*. The server is not responding. Please try again later.`);
         }
     }
 
@@ -2351,9 +2397,10 @@ const handleIncomingMessage = async (message) => {
     const EXECUTION_DELAY_MS = 3000;
     const codePattern = /jh(\.\w+){2,}/gi;
     const subscriberIdPattern = /(?<!\d)\b\d{4,6}\b(?!\d)/g;
-    const codeMatches = messageBody.match(codePattern) || [];
-    const subscriberIdMatches = messageBody.match(subscriberIdPattern) || [];
-    const codesInThisMessage = [...new Set([...codeMatches, ...subscriberIdMatches])].map(c => c.toLowerCase());
+    const codesFromText = (messageBody.match(codePattern) || []).concat(messageBody.match(subscriberIdPattern) || []);
+
+    const codesFromImage = await extractUsernamesFromImage(message);
+    const codesInThisMessage = [...new Set([...codesFromText, ...codesFromImage])].map(c => c.toLowerCase());
 
     const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
     const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
@@ -2424,9 +2471,9 @@ const handleIncomingMessage = async (message) => {
         return;
     }
     if (messageBodyNoSpaces.includes('anpcheck')) {
-        await message.reply('🤖 Running ANP status check...');
+        await message.reply('ANP status check...');
         await runAnpStatusCheckAndNotify();
-        await message.reply('✅ ANP check completed');
+        await message.reply('Check completed');
         return;
     }
     if (messageBodyNoSpaces.includes('anpupdate')) {
