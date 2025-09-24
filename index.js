@@ -2112,10 +2112,6 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
                 console.log(`Activating Deactivated ID for ${userCode}...`);
                 deactivateResult = await DeactivateID(fetchedUserData, cookies);
                 responseMessage += '\n' + (deactivateResult ? '*Subscriber activated* ✅' : 'Failed to active ❌');
-            } else if (wantsDeactivation) {
-                console.log(`Deactivating ID for ${userCode}...`);
-                deactivateResult = await DeactivateID(fetchedUserData, cookies);
-                responseMessage += '\n' + (deactivateResult ? '*Subscriber deactivated* ✅' : 'Failed to deactivate ❌');
             }
 
             if (wantsPasswordReset) {
@@ -2599,8 +2595,7 @@ const handleIncomingMessage = async (message) => {
     const codesInThisMessage = [...new Set([...codesFromText, ...codesFromImage])].map(c => c.toLowerCase());
 
     const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
-    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated)\b/i.test(messageBody);
-    const wantsDeactivation = /\b(de-activate|deactivate)\b/i.test(messageBody);
+    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
     const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
 
     let serviceProvider = null;
@@ -2616,7 +2611,6 @@ const handleIncomingMessage = async (message) => {
     const combinedActions = { ...existingSession.pendingActions };
     if (wantsSessionReset) combinedActions.wantsSessionReset = true;
     if (wantsDeactiveID) combinedActions.wantsDeactiveID = true;
-    if (wantsDeactivation) combinedActions.wantsDeactivation = true;
     if (wantsPasswordReset) combinedActions.wantsPasswordReset = true;
     if (serviceProvider) combinedActions.serviceProvider = serviceProvider;
 
@@ -2645,8 +2639,7 @@ const handleIncomingMessage = async (message) => {
                 processActions(message, userIdentifier,
                     sessionToProcess.pendingActions.wantsSessionReset,
                     sessionToProcess.pendingActions.wantsPasswordReset,
-                    sessionToProcess.pendingActions.wantsDeactiveID,
-                    sessionToProcess.pendingActions.wantsDeactivation
+                    sessionToProcess.pendingActions.wantsDeactiveID
                 );
             }
         }, EXECUTION_DELAY_MS);
