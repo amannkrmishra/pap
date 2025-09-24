@@ -62,21 +62,6 @@ let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
-let batchProcessingInProgress = false;
-const BATCH_CONFIG = {
-    CONCURRENT_REQUESTS: 28,
-    EXCEL_FILENAME: 'User.xlsx',
-    LOG_FILE_PATH: path.resolve(__dirname, 'batch_logs.txt')
-};
-
-const logBatchResponse = (username, response) => {
-    const timestamp = new Date().toISOString();
-    const logEntry = `${timestamp} | ${username} >>> ${response}\r\n`;
-    fs.appendFile(BATCH_CONFIG.LOG_FILE_PATH, logEntry, err => {
-        if (err) console.error('Failed to write batch log:', err);
-    });
-};
-
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
     THRESHOLD_PERCENTAGE: 1,
@@ -439,10 +424,10 @@ const handleSubscriberUpdate = async (message) => {
 
         // 7. Confirm the result to the user
         if (response.data && response.data.STATUS === "OK") {
-            await chat.sendMessage(`✅ Details have been updated successfully for *${userData.Username}*!`);
+            await chat.sendMessage(`Details have been updated successfully for *${userData.Username}*!`);
         } else {
             const serverStatus = response.data ? response.data.STATUS : "No response";
-            await chat.sendMessage(`❌ Update failed. Server responded: ${serverStatus}`);
+            await chat.sendMessage(`Update failed. Server responded: ${serverStatus}`);
         }
 
     } catch (error) {
@@ -458,7 +443,7 @@ const handleBulkSubscriberUpdate = async (message) => {
 
     // 1. Check if there are any user codes in the session
     if (!session || !session.userCodes || session.userCodes.length === 0) {
-        await chat.sendMessage("❌ No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
+        await chat.sendMessage("No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
         return;
     }
 
@@ -468,7 +453,7 @@ const handleBulkSubscriberUpdate = async (message) => {
 
     const cookies = await getCookies();
     if (!cookies) {
-        await chat.sendMessage("❌ Authentication failed. Cannot proceed.");
+        await chat.sendMessage("Authentication failed. Cannot proceed.");
         userSessions.delete(userIdentifier); // Clean up session on auth failure
         return;
     }
@@ -510,7 +495,7 @@ const handleBulkSubscriberUpdate = async (message) => {
                 let reply = `*Username:* ${userData.Username}\n`;
                 reply += `*New Mobile No.:* ${newPhoneNumber}\n`;
                 reply += `*New Email ID:* ${newEmail}\n\n`;
-                reply += `✅ Details have been updated successfully.`;
+                reply += `Details have been updated successfully.`;
                 await chat.sendMessage(reply);
             } else {
                 const serverStatus = response.data ? response.data.STATUS : "No response";
@@ -519,7 +504,7 @@ const handleBulkSubscriberUpdate = async (message) => {
 
         } catch (error) {
             console.error(`Error during bulk update for ${userCode}:`, error.message);
-            await chat.sendMessage(`❌ An error occurred while processing *${userCode}*.`);
+            await chat.sendMessage(`An error occurred while processing *${userCode}*.`);
         }
 
         // Add a small delay to avoid spamming the server
@@ -528,7 +513,7 @@ const handleBulkSubscriberUpdate = async (message) => {
 
     // 6. Clean up the session after the process is complete
     userSessions.delete(userIdentifier);
-    await chat.sendMessage("✅ Bulk update process finished.");
+    await chat.sendMessage("Bulk update process finished.");
 };
 
 const getCookies = async () => {
@@ -790,230 +775,6 @@ async function fetchUserDataFromPortal(userCode) {
         Name: userData.name
     } : null;
 }
-
-const batchResetSessions = async () => {
-    if (batchProcessingInProgress) {
-        console.log('Batch processing already in progress - skipping');
-        return;
-    }
-
-    batchProcessingInProgress = true;
-    console.log('Starting batch session reset...');
-
-    try {
-        // Read Excel file
-        const filePath = path.resolve(__dirname, BATCH_CONFIG.EXCEL_FILENAME);
-        if (!fs.existsSync(filePath)) {
-            console.error(`File '${BATCH_CONFIG.EXCEL_FILENAME}' not found`);
-            return;
-        }
-
-        const workbook = XLSX.readFile(filePath);
-        const jsonData = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1 });
-        const userList = jsonData.slice(1).map(row => row[0]).filter(username => username?.trim());
-
-        if (userList.length === 0) {
-            console.error('No valid usernames found in Excel file');
-            return;
-        }
-
-        // Get cookies and process users
-        const cookies = await getCookies();
-        if (!cookies) {
-            console.error('Authentication failed');
-            return;
-        }
-
-        let successCount = 0;
-        let failCount = 0;
-        let failedUsers = []; // Track failed users for retry
-
-        // Clear previous log file
-        if (fs.existsSync(BATCH_CONFIG.LOG_FILE_PATH)) {
-            fs.unlinkSync(BATCH_CONFIG.LOG_FILE_PATH);
-        }
-
-        // Add header to log file
-        logBatchResponse('BATCH_START', `Starting batch processing of ${userList.length} users at ${new Date().toISOString()}`);
-
-        // Process in batches with retry logic
-        let currentCookies = cookies;
-        let authRefreshInProgress = false;
-
-        for (let i = 0; i < userList.length; i += BATCH_CONFIG.CONCURRENT_REQUESTS) {
-            const batch = userList.slice(i, i + BATCH_CONFIG.CONCURRENT_REQUESTS);
-
-            await Promise.all(batch.map(async (username) => {
-                let retryCount = 0;
-                const maxRetries = 2;
-
-                while (retryCount <= maxRetries) {
-                    try {
-                        const result = await resetSession({ Username: username }, currentCookies);
-
-                        // Check for session expiry indicators
-                        if (result === 'ERROR' && retryCount < maxRetries) {
-                            // Wait if another thread is already refreshing auth
-                            while (authRefreshInProgress) {
-                                await new Promise(resolve => setTimeout(resolve, 100));
-                            }
-
-                            // Try with current cookies first (might have been refreshed by another thread)
-                            if (retryCount === 0) {
-                                retryCount++;
-                                continue;
-                            }
-
-                            // If still failing, refresh cookies (only one thread at a time)
-                            if (!authRefreshInProgress) {
-                                authRefreshInProgress = true;
-                                try {
-                                    console.log(`Refreshing auth due to ${username} failure...`);
-                                    const newCookies = await getCookies();
-                                    if (newCookies) {
-                                        currentCookies = newCookies;
-                                    } else {
-                                        throw new Error('Re-authentication failed');
-                                    }
-                                } finally {
-                                    authRefreshInProgress = false;
-                                }
-                            }
-                            retryCount++;
-                            continue;
-                        }
-
-                        if (result === 'SUCCESS' || result === 'NOT_ACTIVE') {
-                            successCount++;
-                            logBatchResponse(username, `SUCCESS: ${result}`);
-                        } else {
-                            failCount++;
-                            failedUsers.push(username); // Add to failed list
-                            logBatchResponse(username, `FAILED: ${result}`);
-                        }
-                        break;
-
-                    } catch (error) {
-                        if (retryCount < maxRetries) {
-                            logBatchResponse(username, `RETRY_${retryCount + 1}: ${error.message}`);
-                            retryCount++;
-                            await new Promise(resolve => setTimeout(resolve, 100)); // Small delay before retry
-                        } else {
-                            failCount++;
-                            failedUsers.push(username); // Add to failed list
-                            logBatchResponse(username, `RETRY_EXHAUSTED: Failed after ${maxRetries + 1} attempts - ${error.message}`);
-                            break;
-                        }
-                    }
-                }
-            }));
-
-            // Small delay between batches
-            if (i + BATCH_CONFIG.CONCURRENT_REQUESTS < userList.length) {
-                await new Promise(resolve => setTimeout(resolve, 200));
-            }
-        }
-
-        // Second Pass: Retry failed users
-        if (failedUsers.length > 0) {
-            logBatchResponse('RETRY_PASS', `Starting retry pass for ${failedUsers.length} failed users`);
-            console.log(`Starting retry pass for ${failedUsers.length} failed users...`);
-
-            // Get fresh cookies for retry pass
-            const retryCookies = await getCookies();
-            if (retryCookies) {
-                currentCookies = retryCookies;
-
-                let retrySuccessCount = 0;
-                let finalFailCount = 0;
-
-                // Process failed users in smaller batches (5 concurrent for retry)
-                const retryBatchSize = Math.min(5, BATCH_CONFIG.CONCURRENT_REQUESTS);
-
-                for (let i = 0; i < failedUsers.length; i += retryBatchSize) {
-                    const retryBatch = failedUsers.slice(i, i + retryBatchSize);
-
-                    await Promise.all(retryBatch.map(async (username) => {
-                        try {
-                            const result = await resetSession({ Username: username }, currentCookies);
-
-                            if (result === 'SUCCESS' || result === 'NOT_ACTIVE') {
-                                retrySuccessCount++;
-                                logBatchResponse(username, `RETRY_PASS_SUCCESS: ${result}`);
-                            } else {
-                                finalFailCount++;
-                                logBatchResponse(username, `RETRY_PASS_FAILED: ${result}`);
-                            }
-                        } catch (error) {
-                            finalFailCount++;
-                            logBatchResponse(username, `RETRY_PASS_ERROR: ${error.message}`);
-                        }
-                    }));
-
-                    // Delay between retry batches
-                    if (i + retryBatchSize < failedUsers.length) {
-                        await new Promise(resolve => setTimeout(resolve, 500));
-                    }
-                }
-
-                // Update final counts
-                successCount += retrySuccessCount;
-                failCount = finalFailCount;
-
-                logBatchResponse('RETRY_COMPLETE', `Retry pass completed: ${retrySuccessCount} recovered, ${finalFailCount} still failed`);
-                console.log(`Retry pass completed: ${retrySuccessCount} recovered, ${finalFailCount} still failed`);
-            } else {
-                logBatchResponse('RETRY_AUTH_FAILED', 'Could not get fresh cookies for retry pass');
-                console.log('Could not get fresh cookies for retry pass');
-            }
-        }
-
-        // Add summary to log file
-        logBatchResponse('BATCH_COMPLETE', `Final results: ${successCount} success, ${failCount} failed`);
-
-        console.log(`Batch complete: ${successCount} success, ${failCount} failed`);
-
-        // Send notification with log file
-        const summaryMessage = `*Batch Session Reset Complete*\n\n` +
-            `*Total:* ${userList.length}\n*Success:* ${successCount}\n*Failed:* ${failCount}`;
-
-        const targetIds = ['916200493605@c.us']; // Aman
-
-        try {
-            // Check if log file exists and send it
-            if (fs.existsSync(BATCH_CONFIG.LOG_FILE_PATH)) {
-                const logMedia = MessageMedia.fromFilePath(BATCH_CONFIG.LOG_FILE_PATH);
-
-                for (const id of targetIds) {
-                    try {
-                        await client.sendMessage(id, summaryMessage);
-                        await client.sendMessage(id, logMedia, {
-                            caption: 'Batch Processing Log File'
-                        });
-                    } catch (err) {
-                        console.error(`Failed to send to ${id}:`, err.message);
-                    }
-                }
-            } else {
-                // If no log file, send just the summary
-                for (const id of targetIds) {
-                    try {
-                        await client.sendMessage(id, summaryMessage);
-                    } catch (err) {
-                        console.error(`Failed to send to ${id}:`, err.message);
-                    }
-                }
-            }
-        } catch (err) {
-            console.error('Failed to send notifications:', err.message);
-        }
-
-    } catch (error) {
-        console.error('Batch processing error:', error.message);
-    } finally {
-        batchProcessingInProgress = false;
-    }
-};
 
 const resetSession = async (userData, cookies) => {
     const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
@@ -2669,12 +2430,6 @@ const handleIncomingMessage = async (message) => {
         return;
     }
 
-    if (messageBodyNoSpaces.includes('batchreset')) {
-        await message.reply('Starting batch session reset...');
-        await batchResetSessions();
-        return;
-    }
-
     if (messageBodyNoSpaces.includes('anpupdate')) {
         await handleAnpUpdate(message);
         return;
@@ -2799,13 +2554,6 @@ client.on('ready', () => {
             console.error('Scheduled daily task failed:', error.message);
         }
     };
-
-    cron.schedule('5 0 * * *', async () => {
-        console.log('Starting scheduled batch session reset...');
-        await batchResetSessions();
-    }, {
-        timezone: "Asia/Kolkata"
-    });
 
     cron.schedule('59 23 * * *', scheduledTask, {
         timezone: "Asia/Kolkata"
