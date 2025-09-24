@@ -56,7 +56,7 @@ const XLSX = require('xlsx');
 const userSessions = new Map();
 let cachedSessionCookies = null;
 let partnerMappings = null;
-const COOKIE_CLEANUP_TIME = 330000; // 5 min 30 sec
+const COOKIE_CLEANUP_TIME = 285000; // 4 min 45 sec
 let cookieCleanupTimeout = null;
 let partnerIndex = null;
 let subscriberDataCache = null;
@@ -64,7 +64,7 @@ let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
 let batchProcessingInProgress = false;
 const BATCH_CONFIG = {
-    CONCURRENT_REQUESTS: 25,
+    CONCURRENT_REQUESTS: 28,
     EXCEL_FILENAME: 'User.xlsx',
     LOG_FILE_PATH: path.resolve(__dirname, 'batch_logs.txt')
 };
@@ -79,7 +79,7 @@ const logBatchResponse = (username, response) => {
 
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
-    THRESHOLD_PERCENTAGE: 2,
+    THRESHOLD_PERCENTAGE: 1,
     TARGET_ID: '916200493605@c.us',
     GROUP_NAME: 'Super Bot - LightWave',
     EXCEL_FILE_NAME: 'PartnerLive.xlsx',
@@ -2811,7 +2811,7 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
-    cron.schedule('*/15 * * * *', runAnpStatusCheckAndNotify, {
+    cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
         timezone: "Asia/Kolkata"
     });
     console.log('WhatsApp bot ready to use!!');
@@ -2943,7 +2943,7 @@ const runAnpStatusCheckAndNotify = async () => {
         }
 
         if (recoveredPartners.length > 0) {
-            let msg = `*Detected: ANP Link UP*\n\n`;
+            let msg = `*Detected: ANP Link UP*\n`;
             recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*` });
             await sendAnpAlert(msg);
         }
