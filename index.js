@@ -2579,14 +2579,14 @@ const handleIncomingMessage = async (message) => {
     }
 
     const userIdentifier = getUserIdentifier(message);
-    const messageBody = message.body.toLowerCase().trim();
+    const messageBody = message.body.toLowerCase().trim().replace(/\s*\.\s*/g, '.');
     const messageBodyNoSpaces = messageBody.replace(/\s/g, '');
 
     console.log(`User Detail: ${userIdentifier}`);
     console.log(`Message: ${messageBody}`);
 
     const SESSION_TIMEOUT_MS = 300000;
-    const EXECUTION_DELAY_MS = 3000;
+    const EXECUTION_DELAY_MS = 2780;
     const codePattern = /jh(\.\w+){2,}/gi;
     const subscriberIdPattern = /(?<!\d)\b\d{4,6}\b(?!\d)/g;
     const codesFromText = (messageBody.match(codePattern) || []).concat(messageBody.match(subscriberIdPattern) || []);
@@ -2595,7 +2595,7 @@ const handleIncomingMessage = async (message) => {
     const codesInThisMessage = [...new Set([...codesFromText, ...codesFromImage])].map(c => c.toLowerCase());
 
     const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
-    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivated)\b/i.test(messageBody);
+    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivate)\b/i.test(messageBody);
     const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
 
     let serviceProvider = null;
