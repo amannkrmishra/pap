@@ -2616,6 +2616,7 @@ const handleIncomingMessage = async (message) => {
     const combinedActions = { ...existingSession.pendingActions };
     if (wantsSessionReset) combinedActions.wantsSessionReset = true;
     if (wantsDeactiveID) combinedActions.wantsDeactiveID = true;
+    if (wantsDeactivation) combinedActions.wantsDeactivation = true;
     if (wantsPasswordReset) combinedActions.wantsPasswordReset = true;
     if (serviceProvider) combinedActions.serviceProvider = serviceProvider;
 
@@ -2644,7 +2645,8 @@ const handleIncomingMessage = async (message) => {
                 processActions(message, userIdentifier,
                     sessionToProcess.pendingActions.wantsSessionReset,
                     sessionToProcess.pendingActions.wantsPasswordReset,
-                    sessionToProcess.pendingActions.wantsDeactiveID
+                    sessionToProcess.pendingActions.wantsDeactiveID,
+                    sessionToProcess.pendingActions.wantsDeactivation
                 );
             }
         }, EXECUTION_DELAY_MS);
