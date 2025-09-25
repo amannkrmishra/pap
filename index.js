@@ -63,6 +63,7 @@ let nmsSessionCache = null;
 let nmsCacheTime = 0;
 const PROCESSED_TICKETS_FILE_PATH = path.join(__dirname, 'processedTicketIds.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
+const ANP_REPORT_STATE_FILE_PATH = path.join(__dirname, 'anpReportState.json');
 let processedTicketIds = new Set();
 let sessionCache = null;
 let cacheTime = 0;
@@ -133,6 +134,30 @@ const loadProcessedTicketIds = () => {
         }
     } catch (error) {
         console.error('Error loading processed ticket IDs:', error.message);
+    }
+};
+
+const saveAnpReportState = () => {
+    try {
+        const data = JSON.stringify({ lastStillDownReportTime });
+        fs.writeFileSync(ANP_REPORT_STATE_FILE_PATH, data, 'utf8');
+    } catch (error) {
+        console.error('Error saving ANP report state:', error.message);
+    }
+};
+
+const loadAnpReportState = () => {
+    try {
+        if (fs.existsSync(ANP_REPORT_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(ANP_REPORT_STATE_FILE_PATH, 'utf8');
+            const state = JSON.parse(data);
+            if (state && typeof state.lastStillDownReportTime === 'number') {
+                lastStillDownReportTime = state.lastStillDownReportTime;
+                console.log(`Loaded last ANP report time: ${new Date(lastStillDownReportTime).toLocaleString()}`);
+            }
+        }
+    } catch (error) {
+        console.error('Error loading ANP report state:', error.message);
     }
 };
 
@@ -2272,10 +2297,11 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
         }
         
         if (stillDownAlerts.length > 0) {
-            const ONE_HOUR_MS = 90 * 60 * 1000;
-            if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
+            const NINETY_MINUTES_MS = 90 * 60 * 1000;
+            if (Date.now() - lastStillDownReportTime >= NINETY_MINUTES_MS) {
                 await sendAnpAlert(`*Still ANPs Down Report! ➕*\n\n${stillDownAlerts.join('\n')}`);
                 lastStillDownReportTime = Date.now();
+                saveAnpReportState();
             }
         }
 
@@ -2528,6 +2554,7 @@ const handleIncomingMessage = async (message) => {
 client.on('ready', () => {
     loadProcessedTicketIds();
     loadAnpDownState();
+    loadAnpReportState();
     loadAllData();
     botStartTime = Date.now();
     const scheduledTask = async () => {
