@@ -186,9 +186,7 @@ const sendTicketAlert = async (message) => {
     try {
         const chat = await client.getChatById(TICKET_MONITOR_CONFIG.TARGET_ID);
         await chat.sendMessage(message);
-        console.log(`Successfully alert to ${TICKET_MONITOR_CONFIG.TARGET_ID}`);
     } catch (error) {
-        console.error(`Failed to send ticket alert: ${error.message}`);
     }
 };
 
@@ -292,7 +290,6 @@ const getTicketDetails = async (ticketUrl, cookies) => {
 };
 
 const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
-    console.log(`Running ticket check, triggered by: ${triggeredBy}...`);
     try {
         const cookies = await authenticate('admin', 'Pass@123');
         const client = axios.create({
@@ -330,7 +327,6 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
         }
 
         for (const ticket of ticketsToProcess) {
-            console.log(`Found new ticket: #${ticket.ticketId}. Fetching details...`);
             const freshCookiesForDetails = await authenticate('admin', 'Pass@123');
             const ticketDetails = await getTicketDetails(ticket.viewLink, freshCookiesForDetails);
             
@@ -2194,7 +2190,7 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
         }
 
         if (recoveredPartners.length > 0) {
-            let msg = `*BOT Detected: Partner-Link Up 🎉*\n`;
+            let msg = `*Detected: Partner-Link Up 🎉*\n`;
             recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*`; });
             await sendAnpAlert(msg);
         }
@@ -2206,25 +2202,26 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
                 lastStillDownReportTime = Date.now();
             }
         }
-        
+
         if (newAlerts.length > 0) {
             newAlerts.sort((a, b) => a.name.localeCompare(b.name));
             for (const p of newAlerts) {
-                const details = extraDetails[p.id] || {};
-                const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
-                let msg = `*BOT Detected: Partner Link-Down ❌*\n\n` +
-                    `*Name:* ${p.name} (${details['District'] || 'N/A'})\n` +
-                    `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n` +
-                    `*Contact:* ${details['Contact No'] || 'N/A'}\n` +
-                    `*VLAN (S/C):* ${details['Stack VLAN'] || 'N/A'} / ${details['Customer VLAN'] || 'N/A'}\n` +
-                    `*JH Code:* ${details['JH Code'] || 'N/A'}\n` +
-                    `*Port:* ${details['Primary Port'] || 'N/A'}\n` +
-                    `*BNG:* ${details['BNG'] || 'N/A'}`;
-                await sendAnpAlert(msg);
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
+            const details = extraDetails[p.id] || {};
+            const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
+            let msg = `*Detected: Partner Link-Down ❌*\n\n` +
+            `*Name:* ${p.name}\n` +
+            `*District:* ${details['District'] || 'Not Found'}\n` +
+            `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n` +
+            `*Contact:* ${details['Contact No'] || 'Not Found'}\n` +
+            `*VLAN (S/C):* ${details['Stack VLAN'] || 'Not Found'} / ${details['Customer VLAN'] || 'Not Found'}\n` +
+            `*JH Code:* ${details['JH Code'] || 'Not Found'}\n` +
+            `*Port:* ${details['Primary Port'] || 'Not Found'}\n` +
+            `*BNG:* ${details['BNG'] || 'Not Found'}`;
+        await sendAnpAlert(msg);
+        await new Promise(resolve => setTimeout(resolve, 100));
         }
-        
+    }
+
         if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
             console.log(`✅ All partners healthy - no issues detected`);
         }
