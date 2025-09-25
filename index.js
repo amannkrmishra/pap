@@ -1589,72 +1589,48 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
     userSessions.delete(userIdentifier);
 };
 
-const processTasks = async (cookies, originalMessage) => {
+const processTasks = async (originalMessage) => {
     try {
-        const {
-            data
-        } = await axios.get(mainURL, {
-            headers: {
-                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
-            },
-            timeout: 5000
-        });
-        const $ = cheerio.load(data);
-        const submittedTasks = [];
-        const verifiedTasks = [];
-
-        $('table tbody tr').each((_, el) => {
-            const cells = $(el).find('td');
-            const status = $(cells[1]).text().trim().toLowerCase();
-            const link = $(cells[2]).find('a').attr('href');
-            const oltabid = link?.split('/')[3];
-            if (status === 'submitted' && link) submittedTasks.push({
-                link,
-                oltabid
+        const { submittedTasks, verifiedTasks } = await withApiAuth(async (cookies) => {
+            const { data } = await axios.get(mainURL, {
+                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+                timeout: 15000
             });
-            else if (status === 'verified' && link) verifiedTasks.push({
-                link
+            const $ = cheerio.load(data);
+            const submitted = [];
+            const verified = [];
+            $('table tbody tr').each((_, el) => {
+                const cells = $(el).find('td');
+                const status = $(cells[1]).text().trim().toLowerCase();
+                const link = $(cells[2]).find('a').attr('href');
+                const oltabid = link?.split('/')[3];
+                if (status === 'submitted' && link) submitted.push({ link, oltabid });
+                else if (status === 'verified' && link) verified.push({ link });
             });
+            return { submittedTasks: submitted, verifiedTasks: verified };
         });
 
-        const results = {
-            submitted: {
-                total: submittedTasks.length,
-                processed: 0
-            },
-            verified: {
-                total: verifiedTasks.length,
-                processed: 0
-            }
-        };
+        const results = { submitted: { total: submittedTasks.length, processed: 0 }, verified: { total: verifiedTasks.length, processed: 0 } };
 
-        for (const {
-                link,
-                oltabid
-            }
-            of submittedTasks) {
-            if (await handleSubmittedForm(link, oltabid, cookies, null, originalMessage)) results.submitted.processed++;
+        for (const { link, oltabid } of submittedTasks) {
+            if (await handleSubmittedForm(link, oltabid, null, originalMessage)) results.submitted.processed++;
         }
-        for (const {
-                link
-            }
-            of verifiedTasks) {
-            if (await handleVerifiedForm(link, cookies, originalMessage)) results.verified.processed++;
+        for (const { link } of verifiedTasks) {
+            if (await handleVerifiedForm(link, originalMessage)) results.verified.processed++;
         }
-
         return results;
     } catch (err) {
-        console.error(`Error processing tasks: ${err.message}`);
+        console.error(`Error processing tasks after retries: ${err.message}`);
         return null;
     }
 };
 
-const processAllForms = async (cookies, originalMessage) => {
+const processAllForms = async (originalMessage) => {
     let totalProcessed = 0;
     let isComplete = false;
 
     while (!isComplete) {
-        const results = await processTasks(cookies, originalMessage);
+        const results = await processTasks(originalMessage);
         if (results) {
             totalProcessed += results.submitted.processed + results.verified.processed;
             console.log(`Processed ${results.submitted.processed} Submitted and ${results.verified.processed} Verified Forms.`);
@@ -1739,141 +1715,101 @@ const getUsername = async (firstName, baseUsername, cookies) => {
     return response.UNAME || null;
 };
 
-const createSubscription = async (link, derivedUsername, cookies, originalMessage) => {
+const createSubscription = async (link, derivedUsername, originalMessage) => {
     try {
-        const hiddenInputs = await getHiddenInputs(link, cookies);
-        if (!hiddenInputs.oltabid || !hiddenInputs.pggroupid || !hiddenInputs.pkgid) {
-            throw new Error('Required hidden inputs not found');
-        }
-
-        // Extract the existing username from the form
-        const {
-            data: formData
-        } = await axios.get(`${baseURL}${link}`, {
-            headers: {
-                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
-            },
-            timeout: 9000
-        });
-        const $ = cheerio.load(formData);
-        const existingUsername = ($('input#uname').attr('value') || $('input#dusername_org').attr('value') || '').trim();
-
-        // Present options to user
-        let optionsMessage = `Choose username option:\n`;
-        if (existingUsername) {
-            optionsMessage += `1. Default Username: ${existingUsername}\n`;
-        }
-        optionsMessage += `2. Bot Username: ${derivedUsername}\n`;
-        optionsMessage += `3. Input Username manually\n`;
-
-        await originalMessage.reply(optionsMessage);
-
-        const userChoice = await waitForReply(originalMessage);
-        let finalUsername;
-
-        switch (userChoice.body.trim()) {
-            case '1':
-                if (existingUsername) {
-                    const verifiedExisting = await getUsername(hiddenInputs.firstname, existingUsername, cookies);
-                    if (verifiedExisting) {
-                        finalUsername = existingUsername;
-                    } else {
-                        return false;
-                    }
-                }
-                break;
-            case '2':
-                finalUsername = derivedUsername;
-                break;
-            case '3':
-                await originalMessage.reply("Input Manual Username:");
-                const manualUsernameMessage = await waitForReply(originalMessage);
-                const manualUsername = manualUsernameMessage.body.trim();
-                const verifiedManual = await getUsername(hiddenInputs.firstname, manualUsername, cookies);
-                if (verifiedManual) {
-                    finalUsername = manualUsername;
-                } else {
-                    return false;
-                }
-                break;
-            default:
-                await originalMessage.reply("Invalid option.");
-                return false;
-        }
-
-        if (!finalUsername) return false;
-
-        const payload = new URLSearchParams({
-            oltabid: hiddenInputs.oltabid,
-            uname: finalUsername,
-            pggroupid: hiddenInputs.pggroupid,
-            pkgid: hiddenInputs.pkgid,
-            anp: hiddenInputs.anp,
-            vlanid: hiddenInputs.vlanid,
-            caf_type: hiddenInputs.caf_type,
-            railwire_test_name: cookies.railwireCookie.value,
-            mobileno: hiddenInputs.mobileno
-        }).toString();
-
-        const {
-            status,
-            data: subscriptionResponse
-        } = await axios.post(`${baseURL}/kycapis/create_subscription`, payload, {
-            headers: {
-                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-                'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            timeout: 9000
-        });
-
-        if (subscriptionResponse.STATUS === undefined) {
-            throw new Error('Cookie expired during subscription creation');
-        }
-
-        console.log(status === 200 ? 'Subscription created.' : 'Subscription failed.', subscriptionResponse);
-
-        if (status === 200) {
-            const userData = await fetchUserDataFromPortal(finalUsername);
-            if (userData) {
-                const resetResponse = await resetPassword(userData, cookies);
-                console.log('Password reset response:', resetResponse);
-            } else {
-                console.error('Failed to fetch user data for password reset.');
+        return await withApiAuth(async (cookies) => {
+            const hiddenInputs = await getHiddenInputs(link, cookies);
+            if (!hiddenInputs.oltabid || !hiddenInputs.pggroupid || !hiddenInputs.pkgid) {
+                throw new Error('Required hidden inputs not found');
             }
-        }
-        return status === 200;
+
+            const { data: formData } = await axios.get(`${baseURL}${link}`, {
+                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+                timeout: 9000
+            });
+            const $ = cheerio.load(formData);
+            const existingUsername = ($('input#uname').attr('value') || $('input#dusername_org').attr('value') || '').trim();
+
+            let optionsMessage = `Choose username option:\n`;
+            if (existingUsername) optionsMessage += `1. Default Username: ${existingUsername}\n`;
+            optionsMessage += `2. Bot Username: ${derivedUsername}\n`;
+            optionsMessage += `3. Input Username manually\n`;
+            await originalMessage.reply(optionsMessage);
+
+            const userChoice = await waitForReply(originalMessage);
+            let finalUsername;
+            switch (userChoice.body.trim()) {
+                case '1':
+                    if (existingUsername) finalUsername = existingUsername;
+                    break;
+                case '2':
+                    finalUsername = derivedUsername;
+                    break;
+                case '3':
+                    await originalMessage.reply("Input Manual Username:");
+                    finalUsername = (await waitForReply(originalMessage)).body.trim();
+                    break;
+                default:
+                    await originalMessage.reply("Invalid option."); return false;
+            }
+            if (!finalUsername) return false;
+            const verifiedUsername = await getUsername(hiddenInputs.firstname, finalUsername, cookies);
+            if (!verifiedUsername) {
+                await originalMessage.reply(`Username "${finalUsername}" is not available.`);
+                return false;
+            }
+
+            const payload = new URLSearchParams({
+                oltabid: hiddenInputs.oltabid, uname: verifiedUsername, pggroupid: hiddenInputs.pggroupid,
+                pkgid: hiddenInputs.pkgid, anp: hiddenInputs.anp, vlanid: hiddenInputs.vlanid,
+                caf_type: hiddenInputs.caf_type, railwire_test_name: cookies.railwireCookie.value,
+                mobileno: hiddenInputs.mobileno
+            }).toString();
+
+            const { status } = await axios.post(`${baseURL}/kycapis/create_subscription`, payload, {
+                headers: {
+                    Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                timeout: 9000
+            });
+
+            if (status === 200) {
+                const userData = await fetchUserDataFromPortal(verifiedUsername);
+                if (userData) await resetPassword(userData);
+            }
+            return status === 200;
+        });
     } catch (err) {
-        console.error(`Error creating subscription: ${err.message}`);
+        console.error(`Error creating subscription after retries: ${err.message}`);
         return false;
     }
 };
 
 
-const handleVerifiedForm = async (link, cookies, originalMessage) => {
+const handleVerifiedForm = async (link, originalMessage) => {
     try {
-        const {
-            data
-        } = await axios.get(`${baseURL}${link}`, {
-            headers: {
-                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
-            },
-            timeout: 9000
+        return await withApiAuth(async (cookies) => {
+            const { data } = await axios.get(`${baseURL}${link}`, {
+                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+                timeout: 9000
+            });
+            const $ = cheerio.load(data);
+            const firstName = (await getHiddenInputs(link, cookies)).firstname?.split(' ')[0]?.toLowerCase();
+            if (!firstName) throw new Error('First name not found.');
+
+            const associatedPartner = $(`.profile-info-name:contains('Associated Partner')`).next().text().trim().toLowerCase();
+            const jhCode = jhCodeMap?.get(associatedPartner);
+            if (!jhCode) throw new Error('JH Code not found for partner.');
+
+            const baseUsername = `${jhCode}.${firstName}`;
+            const finalUsername = await getUsername(firstName, baseUsername, cookies);
+            if (!finalUsername) throw new Error('Failed to derive username.');
+
+            return await createSubscription(link, finalUsername, originalMessage);
         });
-        const $ = cheerio.load(data);
-        const firstName = (await getHiddenInputs(link, cookies)).firstname?.split(' ')[0]?.toLowerCase();
-        if (!firstName) throw new Error('First name not found.');
-
-        const associatedPartner = $(`.profile-info-name:contains('Associated Partner')`).next().text().trim().toLowerCase();
-        const jhCode = jhCodeMap?.get(associatedPartner);
-        if (!jhCode) throw new Error('JH Code not found for partner.');
-
-        const baseUsername = `${jhCode}.${firstName}`;
-        const finalUsername = await getUsername(firstName, baseUsername, cookies);
-        if (!finalUsername) throw new Error('Failed to derive username.');
-
-        return await createSubscription(link, finalUsername, cookies, originalMessage);
     } catch (err) {
-        console.error(`Error processing verified form: ${err.message}`);
+        console.error(`Error processing verified form after retries: ${err.message}`);
         return false;
     }
 };
@@ -1926,82 +1862,22 @@ const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
     }
 };
 
-const handleSubmittedForm = async (link, oltabid, cookies, username, originalMessage) => {
+const handleSubmittedForm = async (link, oltabid, username, originalMessage) => {
     try {
-        const {
-            data
-        } = await axios.get(`${baseURL}${link}`, {
-            headers: {
-                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
-            },
-            timeout: 8000
-        });
-        const $ = cheerio.load(data);
-
-        // Extracting Address Proof
-        const addressProofElement = $(`.profile-info-name:contains('Address Proof Copy')`).next().find('span');
-        const addressProof = addressProofElement.length > 0 && addressProofElement.text().trim().toLowerCase() === 'file not exists' ? 'file not exists' : 'View';
-        const mobileNo = $(`.profile-info-name:contains('Mobile No.')`).next().find('span').text().trim();
-
-        if (addressProof === 'file not exists') {
-            console.log('Marking as verified because file not exists.');
-            const payload = new URLSearchParams({
-                oltabid,
-                mobileno_dual: mobileNo,
-                railwire_test_name: cookies.railwireCookie.value
-            }).toString();
-            await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
-                headers: {
-                    Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                timeout: 5000
+        return await withApiAuth(async (cookies) => {
+            const { data } = await axios.get(`${baseURL}${link}`, {
+                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+                timeout: 8000
             });
-            return true;
-        } else {
-            console.log(`Address proof exists for mobile ${mobileNo}.`);
+            const $ = cheerio.load(data);
 
-            let extractedData = `Address Proof for No.: ${mobileNo}\n\nDetails:\n`;
+            const addressProofElement = $(`.profile-info-name:contains('Address Proof Copy')`).next().find('span');
+            const addressProof = addressProofElement.length > 0 && addressProofElement.text().trim().toLowerCase() === 'file not exists' ? 'file not exists' : 'View';
+            const mobileNo = $(`.profile-info-name:contains('Mobile No.')`).next().find('span').text().trim();
 
-            $('.profile-info-row').each((index, element) => {
-                const infoName = $(element).find('.profile-info-name').text().trim();
-                const infoValueElement = $(element).find('.profile-info-value span');
-
-                let infoValue = infoValueElement.text().trim();
-
-                // Handle links specifically
-                const linkElement = infoValueElement.find('a');
-                if (linkElement.length > 0) {
-                    const link = linkElement.attr('href');
-                    infoValue = `View >> ${baseURL}${link}`;
-                }
-
-                if (
-                    !infoName.toLowerCase().includes('notice') &&
-                    !infoName.toLowerCase().includes('reason for kyc rejection') &&
-                    !infoName.toLowerCase().includes('address type') &&
-                    !infoName.toLowerCase().includes('id no') &&
-                    !infoName.toLowerCase().includes('door no') &&
-                    !infoName.toLowerCase().includes('street') &&
-                    !infoName.toLowerCase().includes('applied package')
-                ) {
-                    extractedData += `${infoName}: ${infoValue}\n`;
-                }
-            });
-
-            // Send the extracted data to the user
-            await originalMessage.reply(extractedData);
-            await originalMessage.reply(`Do you want to verify? (y/n)`);
-
-            const userInputMessage = await waitForReply(originalMessage);
-            const userInput = userInputMessage.body.toLowerCase();
-
-            if (userInput.startsWith('y')) {
-                const payload = new URLSearchParams({
-                    oltabid,
-                    mobileno_dual: mobileNo,
-                    railwire_test_name: cookies.railwireCookie.value
-                }).toString();
+            if (addressProof === 'file not exists') {
+                console.log('Marking as verified because file not exists.');
+                const payload = new URLSearchParams({ oltabid, mobileno_dual: mobileNo, railwire_test_name: cookies.railwireCookie.value }).toString();
                 await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
                     headers: {
                         Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
@@ -2011,12 +1887,42 @@ const handleSubmittedForm = async (link, oltabid, cookies, username, originalMes
                 });
                 return true;
             } else {
-                console.log('User choose not to verify. Skipping verification.');
-                return false;
+                let extractedData = `Address Proof for No.: ${mobileNo}\n\nDetails:\n`;
+                $('.profile-info-row').each((index, element) => {
+                    const infoName = $(element).find('.profile-info-name').text().trim();
+                    const infoValueElement = $(element).find('.profile-info-value span');
+                    let infoValue = infoValueElement.text().trim();
+                    const linkElement = infoValueElement.find('a');
+                    if (linkElement.length > 0) {
+                        infoValue = `View >> ${baseURL}${linkElement.attr('href')}`;
+                    }
+                    if (!/notice|reason for kyc rejection|address type|id no|door no|street|applied package/i.test(infoName)) {
+                        extractedData += `${infoName}: ${infoValue}\n`;
+                    }
+                });
+
+                await originalMessage.reply(extractedData);
+                await originalMessage.reply(`Do you want to verify? (y/n)`);
+                const userInput = (await waitForReply(originalMessage)).body.toLowerCase();
+
+                if (userInput.startsWith('y')) {
+                    const payload = new URLSearchParams({ oltabid, mobileno_dual: mobileNo, railwire_test_name: cookies.railwireCookie.value }).toString();
+                    await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
+                        headers: {
+                            Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+                            'Content-Type': 'application/x-www-form-urlencoded'
+                        },
+                        timeout: 5000
+                    });
+                    return true;
+                } else {
+                    console.log('User chose not to verify. Skipping verification.');
+                    return false;
+                }
             }
-        }
+        });
     } catch (err) {
-        console.error(`Error processing submitted form for ${username}: ${err.message}`);
+        console.error(`Error processing submitted form for ${username} after retries: ${err.message}`);
         return false;
     }
 };
@@ -2129,39 +2035,46 @@ const handleIncomingMessage = async (message) => {
         await handleAnpUpdate(message);
         return;
     }
+
     if (messageBodyNoSpaces.includes('subsupdate')) {
         await handleSubscriberUpdate(message);
         return;
     }
+
     if (messageBodyNoSpaces.includes('bulksubupdate')) {
         await handleBulkSubscriberUpdate(message);
         return;
     }
+
     if (messageBodyNoSpaces.includes('ticketupdate')) {
         await handleTicketActivation(message);
         return;
     }
+
     if (messageBodyNoSpaces.includes('checkott')) {
         await checkComplaintStatus(message);
         return;
     }
+
     if (messageBodyNoSpaces.includes('slastart')) {
         await createSLATicket(message);
         return;
     }
+
     if (messageBodyNoSpaces.includes('planchange') || messageBodyNoSpaces.includes('planupdate')) {
         await handlePlanChange(message);
         return;
     }
+
     if (messageBodyNoSpaces.includes('cafupdate')) {
-        const cookies = await getCookies();
-        if (!cookies) {
-            await message.reply('Failed to authenticate. Please try again later.');
-            return;
+        try {
+            await message.reply('eKYC Checking..');
+            const totalProcessed = await processAllForms(message);
+            await message.reply(`Completed: ${totalProcessed}`);
+        } catch (error) {
+            console.error('CAF Update process failed:', error.message);
+            await message.reply('Failed to process CAF updates. Authentication may have failed.');
         }
-        await message.reply('eKYC Checking..');
-        const totalProcessed = await processAllForms(cookies, message);
-        await message.reply(`Completed: ${totalProcessed}`);
         return;
     }
 };
@@ -2179,39 +2092,34 @@ client.on('ready', () => {
                 '916200493605@c.us'  // Aman
             ];
 
-            // Download CSV once and store the media object
             let csvMedia = null;
             try {
-                const cookies = await getCookies();
-                if (!cookies) throw new Error("Authentication failed for CSV download.");
-
-                const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-
-                const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
-                    headers: {
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'Cookie': cookieString,
-                        'Sec-Fetch-Dest': 'document',
-                    },
-                    responseType: 'arraybuffer'
+                const csvBuffer = await withApiAuth(async (cookies) => {
+                    const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+                    const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
+                        headers: {
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Cookie': cookieString,
+                            'Sec-Fetch-Dest': 'document',
+                        },
+                        responseType: 'arraybuffer'
+                    });
+                    if (response.status !== 200) {
+                        throw new Error(`Server responded with status ${response.status}`);
+                    }
+                    return response.data;
                 });
-
-                if (response.status !== 200) {
-                    throw new Error(`Server responded with status ${response.status}`);
-                }
 
                 const today = new Date();
                 const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
                 const filePath = path.join(__dirname, fileName);
-
-                // Write file once
-                fs.writeFileSync(filePath, response.data);
+                fs.writeFileSync(filePath, csvBuffer);
                 csvMedia = MessageMedia.fromFilePath(filePath);
-
                 console.log('CSV downloaded and prepared for distribution');
+
             } catch (error) {
-                console.error('Error downloading CSV:', error.message);
+                console.error('Error downloading CSV after retries:', error.message);
             }
 
             for (const id of targetIds) {
