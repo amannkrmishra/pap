@@ -161,7 +161,8 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     if (!subscriberUsername) return null;
     details.subscriberUsername = subscriberUsername;
 
-    details.subject = $('.well.well-lg:contains("Subject :")').text().replace('Subject :', '').trim();
+    // FIX 1: Precisely target the subject text within the blue span to avoid extra text.
+    details.subject = $('.well.well-lg:contains("Subject :")').find('span.blue').text().trim();
 
     const portalUserData = await fetchUserDataFromPortal(subscriberUsername);
     details.customerMobile = portalUserData?.MobileNo || 'N/A';
@@ -178,8 +179,13 @@ const getTicketDetails = async (ticketUrl, cookies) => {
         const authorElement = $(el).find('.col-xs-2 h5.blue');
         if (authorElement.length > 0) {
             const author = authorElement.text().trim();
-            const timestamp = $(el).find('.col-xs-10 h6.header').text().trim();
-            const content = $(el).find('.col-xs-10 .well').text().trim();
+            const messageContainer = $(el).find('.col-xs-10');
+            const timestamp = messageContainer.find('h6.header').text().trim();
+
+            // FIX 2: Robustly get message content by removing the timestamp from the container's text.
+            // This works even if the message isn't inside a <div class="well">.
+            const content = messageContainer.text().replace(timestamp, '').trim();
+
             if (author && timestamp && content) {
                 details.messages.push({ author, timestamp, content });
             }
@@ -2336,9 +2342,9 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
-    cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
-        timezone: "Asia/Kolkata"
-    });
+ //   cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
+ //       timezone: "Asia/Kolkata"
+ //   });
 
     // 1. Check for new tickets every 5 minutes
     cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
