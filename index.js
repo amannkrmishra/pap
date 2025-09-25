@@ -61,6 +61,8 @@ let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
 let nmsSessionCache = null;
 let nmsCacheTime = 0;
+const PROCESSED_TICKETS_FILE_PATH = path.join(__dirname, 'processedTicketIds.json');
+const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
 let processedTicketIds = new Set();
 let sessionCache = null;
 let cacheTime = 0;
@@ -79,6 +81,26 @@ const ANP_CONFIG = {
     ])
 };
 
+const ALLOWED_TICKET_SUBJECTS = new Set([
+    'slow browsing speed',
+    'wireless network issue',
+    'plan change',
+    'login error / 691',
+    'excess charges from lco',
+    'user email id and contact number change',
+    'fup limit issue',
+    'website issue',
+    'single static ip',
+    'static ip- /29 pool',
+    'static ip- /30 pool',
+    'no connectivity',
+    'others',
+    'remove static ip',
+    'online recharge issue',
+    'package expire',
+    'subscription type change request'
+]);
+
 const TICKET_MONITOR_CONFIG = {
     TARGET_ID: '916200493605@c.us',
     CRON_SCHEDULE: '*/5 * * * *'
@@ -92,6 +114,53 @@ const sendAnpAlert = async (message) => {
 };
 
 // -- Helper Functions Start --
+
+const saveProcessedTicketIds = () => {
+    try {
+        const data = JSON.stringify(Array.from(processedTicketIds));
+        fs.writeFileSync(PROCESSED_TICKETS_FILE_PATH, data, 'utf8');
+    } catch (error) {
+        console.error('Error saving processed ticket IDs:', error.message);
+    }
+};
+
+const loadProcessedTicketIds = () => {
+    try {
+        if (fs.existsSync(PROCESSED_TICKETS_FILE_PATH)) {
+            const data = fs.readFileSync(PROCESSED_TICKETS_FILE_PATH, 'utf8');
+            processedTicketIds = new Set(JSON.parse(data));
+            console.log(`Loaded ${processedTicketIds.size} processed ticket IDs from file.`);
+        }
+    } catch (error) {
+        console.error('Error loading processed ticket IDs:', error.message);
+    }
+};
+
+const saveAnpDownState = () => {
+    try {
+        const data = JSON.stringify(Array.from(downPartnersState.entries()));
+        fs.writeFileSync(ANP_STATE_FILE_PATH, data, 'utf8');
+    } catch (error) {
+        console.error('Error saving ANP down state:', error.message);
+    }
+};
+
+const loadAnpDownState = () => {
+    try {
+        if (fs.existsSync(ANP_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(ANP_STATE_FILE_PATH, 'utf8');
+            const entries = JSON.parse(data);
+            const loadedMap = new Map(entries);
+            downPartnersState.clear();
+            for (const [key, value] of loadedMap.entries()) {
+                downPartnersState.set(key, value);
+            }
+            console.log(`Loaded ${downPartnersState.size} down ANP states from file.`);
+        }
+    } catch (error) {
+        console.error('Error loading ANP down state:', error.message);
+    }
+};
 
 const generateRandomEmail = (username) => {
     if (!username || typeof username !== 'string') {
@@ -308,6 +377,11 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
             $('table#results tbody tr').each((i, row) => {
                 const cells = $(row).find('td');
                 const status = $(cells[7]).text().trim().toLowerCase();
+                const subject = $(cells[4]).text().trim().toLowerCase();
+
+                if (!ALLOWED_TICKET_SUBJECTS.has(subject)) {
+                    return; // Skip if subject is not in the allowed list
+                }
                 
                 if (status === 'open' || status === 'progress') {
                     const ticketId = $(cells[0]).contents().first().text().trim();
@@ -322,7 +396,7 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
         const ticketsToProcess = tickets;
 
         if (ticketsToProcess.length === 0) {
-            console.log('No new "Open" or "Progress" tickets found.');
+            console.log('No new "Open" or "Progress" tickets found for allowed subjects.');
             return;
         }
 
@@ -334,6 +408,7 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
                 const formattedMessage = formatTicketMessage(ticketDetails);
                 await sendTicketAlert(formattedMessage);
                 processedTicketIds.add(ticket.ticketId);
+                saveProcessedTicketIds(); // Save state after processing
             }
         }
     } catch (error) {
@@ -2140,7 +2215,6 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
     console.log(`\nTriggered by: ${triggeredBy} | Time: ${timeStamp}`);
 
     try {
-        // Get both portal and NMS sessions
         const authData = await authenticate('admin', 'Pass@123');
         
         if (!authData.nmsCookie) {
@@ -2174,6 +2248,7 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
             } else if (downPartnersState.has(p.id)) {
                 recoveredPartners.push(downPartnersState.get(p.id).details);
                 downPartnersState.delete(p.id);
+                saveAnpDownState(); // Save state after a partner recovers
             }
         }
 
@@ -2185,6 +2260,7 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
                 stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs}) is still down.`);
             } else {
                 downPartnersState.set(p.id, { firstSeen: Date.now(), details: p });
+                saveAnpDownState(); // Save state after a new partner goes down
                 newAlerts.push(p);
             }
         }
@@ -2450,6 +2526,8 @@ const handleIncomingMessage = async (message) => {
 };
 
 client.on('ready', () => {
+    loadProcessedTicketIds();
+    loadAnpDownState();
     loadAllData();
     botStartTime = Date.now();
     const scheduledTask = async () => {
@@ -2528,9 +2606,9 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
-    //   cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
-    //       timezone: "Asia/Kolkata"
-    //   });
+    cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
+           timezone: "Asia/Kolkata"
+    });
 
     // 1. Check for new tickets every 5 minutes
     cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
