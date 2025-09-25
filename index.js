@@ -120,7 +120,11 @@ const sendTicketAlert = async (message) => {
 };
 
 const formatTicketMessage = (details) => {
-    const openedDate = details.timeOpened.split(' on ')[1] || details.timeOpened;
+    const timeOpenedParts = details.timeOpened.split(' on ');
+    let openedDate = details.timeOpened; // Fallback
+    if (timeOpenedParts.length > 1) {
+        openedDate = timeOpenedParts[1].split(' ').slice(1).join(' ');
+    }
 
     let message = `*Ticket #${details.ticketId}:*\n\n` +
         `*Subscriber:* ${details.subscriberUsername}\n` +
@@ -133,20 +137,19 @@ const formatTicketMessage = (details) => {
         `*Partner:* ${details.partnerName}\n`;
 
     if (details.messages.length > 0) {
-        message += `\n`; // Add a space before the first message line
+        message += `\n`; // Add a space before the message block
         
-        details.messages.forEach(msg => {
+        const messageLines = details.messages.map(msg => {
             const timePart = (msg.timestamp.split(' on ')[0] || msg.timestamp).toLowerCase();
-            
-            const messageBody = `${msg.author}: ${msg.content.replace(/\r?\n|\r/g, ' ')}`;
-
-            message += `${timePart}: ${messageBody}\n`;
+            const singleLineContent = msg.content.replace(/\r?\n|\r/g, ' ');
+            return `${timePart}: ${msg.author}: ${singleLineContent}`;
         });
+        
+        message += messageLines.join('\n'); // Join all message lines with a line break
     }
 
     return message.trim();
-};y
-
+};
 
 const getTicketDetails = async (ticketUrl, cookies) => {
     const { data } = await axios.get(`https://jh.railwire.co.in${ticketUrl}`, {
@@ -165,26 +168,25 @@ const getTicketDetails = async (ticketUrl, cookies) => {
         if (key === 'subscriber') subscriberUsername = value;
         if (key === 'status') details.status = value;
         if (key === 'time opened') details.timeOpened = value;
-        if (key === 'help desk') details.partnerName = value.includes('(') ? value.split('(').pop().replace(')', '').trim() : value;
+        // NOTE: Partner Name scraping from this table is now REMOVED.
     });
 
     if (!subscriberUsername) return null;
     details.subscriberUsername = subscriberUsername;
 
-    // Final Fix: Clone the element, remove the "Add Attachment" span, then get the text.
     const subjectContainer = $('.well.well-lg:contains("Subject :")');
-    subjectContainer.find('span[style="float:right;"]').remove(); // Remove the attachment part
+    subjectContainer.find('span[style="float:right;"]').remove();
     details.subject = subjectContainer.text().replace('Subject :', '').trim();
 
     const portalUserData = await fetchUserDataFromPortal(subscriberUsername);
     details.customerMobile = portalUserData?.MobileNo || 'N/A';
 
+    // --- THIS IS THE KEY CHANGE ---
+    // Get Partner Name, District, and Cluster from the Subscribers.xlsx cache
     const cachedSubData = subscriberDataCache.get(normalize(subscriberUsername));
     details.district = cachedSubData?.['District'] || 'N/A';
     details.cluster = cachedSubData?.['Cluster'] || 'N/A';
-    if (!details.partnerName) {
-        details.partnerName = cachedSubData?.['ANP Name'] || 'N/A';
-    }
+    details.partnerName = cachedSubData?.['ANP Name'] || 'N/A'; // Always use the name from the Excel file.
 
     details.messages = [];
     $('h5.blue').each((i, authorElement) => {
