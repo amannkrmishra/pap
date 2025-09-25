@@ -103,7 +103,7 @@ const ALLOWED_TICKET_SUBJECTS = new Set([
 
 const TICKET_MONITOR_CONFIG = {
     TARGET_ID: '916200493605@c.us',
-    CRON_SCHEDULE: '*/5 * * * *'
+    CRON_SCHEDULE: '*/8 * * * *'
 };
 
 
