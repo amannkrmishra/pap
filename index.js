@@ -120,26 +120,28 @@ const sendTicketAlert = async (message) => {
 };
 
 const formatTicketMessage = (details) => {
+    const openedDate = details.timeOpened.split(' on ')[1] || details.timeOpened;
+
     let message = `*Ticket #${details.ticketId}:*\n\n` +
         `*Subscriber:* ${details.subscriberUsername}\n` +
         `*Customer No.:* ${details.customerMobile}\n` +
         `*Status:* ${details.status}\n` +
-        `*Time opened:* ${details.timeOpened}\n` +
+        `*Time opened:* ${openedDate}\n` +
         `*Subject:* ${details.subject}\n` +
         `*District:* ${details.district}\n` +
         `*Cluster:* ${details.cluster}\n` +
         `*Partner:* ${details.partnerName}\n`;
 
-    // New, cleaner message formatting
     if (details.messages.length > 0) {
         message += `\n`; // Add a space before the first message
         details.messages.forEach(msg => {
-            message += `${msg.timestamp}:\n` +
-                       `${msg.author}:\n${msg.content}\n\n`;
+            const timePart = msg.timestamp.split(' on ')[0] || msg.timestamp;
+            const singleLineMessage = msg.content.replace(/\n/g, ' '); // Replace newlines with spaces
+
+            message += `${timePart}: ${msg.author}: ${singleLineMessage}\n`;
         });
     }
 
-    // Trim the final trailing newlines for a clean look
     return message.trim();
 };
 
