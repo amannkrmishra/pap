@@ -121,7 +121,7 @@ const sendTicketAlert = async (message) => {
 
 const formatTicketMessage = (details) => {
     const timeOpenedParts = details.timeOpened.split(' on ');
-    let openedDate = details.timeOpened; // Fallback
+    let openedDate = details.timeOpened;
     if (timeOpenedParts.length > 1) {
         openedDate = timeOpenedParts[1].split(' ').slice(1).join(' ');
     }
@@ -137,15 +137,15 @@ const formatTicketMessage = (details) => {
         `*Partner:* ${details.partnerName}\n`;
 
     if (details.messages.length > 0) {
-        message += `\n`; // Add a space before the message block
+        message += `\n`;
         
         const messageLines = details.messages.map(msg => {
             const timePart = (msg.timestamp.split(' on ')[0] || msg.timestamp).toLowerCase();
             const singleLineContent = msg.content.replace(/\r?\n|\r/g, ' ');
-            return `${timePart}: ${msg.author}: ${singleLineContent}`;
+            return `*${timePart}* | *${msg.author}:* ${singleLineContent}`;
         });
         
-        message += messageLines.join('\n'); // Join all message lines with a line break
+        message += messageLines.join('\n\n'); 
     }
 
     return message.trim();
