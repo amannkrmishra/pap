@@ -56,7 +56,8 @@ const XLSX = require('xlsx');
 const userSessions = new Map();
 let cachedSessionCookies = null;
 let partnerMappings = null;
-const COOKIE_CLEANUP_TIME = 285000; // 4 min 45 sec
+const COOKIE_CLEANUP_TIME = 600000; // 10 minutes
+let cachedNmsCookie = null; // New cache for the NMS session
 let cookieCleanupTimeout = null;
 let partnerIndex = null;
 let subscriberDataCache = null;
@@ -116,9 +117,8 @@ const maskName = (name) => {
     const parts = name.trim().split(/\s+/);
     const maskedParts = parts.map(part => {
         if (part.length <= 3) {
-            return part; // Don't mask short words
+            return part;
         }
-        // Keeps first 3 letters, masks the rest with 'x'
         return part.substring(0, 3) + 'x'.repeat(part.length - 3);
     });
     return maskedParts.join(' ');
@@ -126,8 +126,6 @@ const maskName = (name) => {
 
 const maskUsername = (userCode) => {
     if (!userCode || typeof userCode !== 'string') return 'N/A';
-
-    // Handles usernames like "jh.jgn.amanmishra" -> "jh.jgn.amaxxxxxxx"
     const parts = userCode.split('.');
     if (parts.length >= 3) {
         const namePart = parts[parts.length - 1];
@@ -137,14 +135,12 @@ const maskUsername = (userCode) => {
         }
         return parts.join('.');
     }
-
-    // Handles subscriber IDs like "12345" -> "123xx" for consistency
     if (/^\d{5,}$/.test(userCode)) {
         if (userCode.length <= 3) return userCode;
         return userCode.substring(0, 3) + 'x'.repeat(userCode.length - 3);
     }
 
-    return userCode; // Return as is if it doesn't match
+    return userCode;
 };
 
 const createHeaderMap = (header) => header.reduce((acc, col, index) => {
@@ -293,8 +289,6 @@ const getSubscriberCount = async () => {
         }
 
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-
-        // The dashboard URL is /billcntl
         const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
 
         const response = await axios.get(dashboardUrl, {
@@ -304,8 +298,6 @@ const getSubscriberCount = async () => {
         });
 
         const $ = cheerio.load(response.data);
-
-        // Find the div with the text 'active subscribers', then get the number from the sibling span
         const subscriberCount = $('.infobox-content:contains("active subscribers")')
             .siblings('.infobox-data-number')
             .text()
@@ -357,12 +349,10 @@ const loadExcelData = () => {
     }
 };
 
-// Handles interactive subscriber detail updates
 const handleSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
 
     try {
-        // 1. Ask for Username or Subscriber ID
         await chat.sendMessage("Enter Username or ID:");
         const idMessage = await waitForReply(message);
         const userCode = idMessage.body.trim();
@@ -370,39 +360,37 @@ const handleSubscriberUpdate = async (message) => {
             await chat.sendMessage("❌ Canceled. No ID provided.");
             return;
         }
-
-        // 2. Fetch user data (Excel first, then live portal as a fallback)
-        const userDataMap = await loadUserDataFromExcel(); // Load the local Excel cache
+        const userDataMap = await loadUserDataFromExcel();
         const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
 
         // 3. Validate if user was found
         if (!userData || !userData.SubscriberId) {
-            await chat.sendMessage(`❌ Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
+            await chat.sendMessage(`Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
             return;
         }
 
         // 4. Ask for the new Phone Number
-        await chat.sendMessage(`Found: *${userData.Username}*\n\nEnter the new Phone Number:`);
+        await chat.sendMessage(`Found: *${userData.Username}*\n\nInput New Phone Number:`);
         const phoneMessage = await waitForReply(message);
         const newPhoneNumber = phoneMessage.body.trim();
         if (!/^\d{10}$/.test(newPhoneNumber)) {
-            await chat.sendMessage("❌ Invalid phone number. Please enter a 10-digit number. Operation canceled.");
+            await chat.sendMessage("Invalid phone number. Please enter a 10-digit number. Operation canceled.");
             return;
         }
 
         // 5. Ask for the new Email Address
-        await chat.sendMessage(`Enter the new Email Address:`);
+        await chat.sendMessage(`Input New Email Address:`);
         const emailMessage = await waitForReply(message);
         const newEmail = emailMessage.body.trim().toLowerCase();
         if (!/\S+@\S+\.\S+/.test(newEmail)) {
-            await chat.sendMessage("❌ Invalid email format. Operation canceled.");
+            await chat.sendMessage("Invalid email format. Operation canceled.");
             return;
         }
 
         // 6. Perform the update via API call
         const cookies = await getCookies();
         if (!cookies) {
-            await chat.sendMessage("❌ Authentication failed. Cannot proceed.");
+            await chat.sendMessage("Authentication failed. Cannot proceed.");
             return;
         }
 
@@ -432,7 +420,7 @@ const handleSubscriberUpdate = async (message) => {
 
     } catch (error) {
         console.error("Error during subscriber update:", error.message);
-        await chat.sendMessage("❌ An unexpected error occurred during the update process.");
+        await chat.sendMessage("An unexpected error occurred during the update process.");
     }
 };
 
@@ -499,7 +487,7 @@ const handleBulkSubscriberUpdate = async (message) => {
                 await chat.sendMessage(reply);
             } else {
                 const serverStatus = response.data ? response.data.STATUS : "No response";
-                await chat.sendMessage(`❌ Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
+                await chat.sendMessage(`Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
             }
 
         } catch (error) {
@@ -785,20 +773,15 @@ const resetSession = async (userData, cookies) => {
         }
     };
     try {
-        // Only make the single, necessary API call
         const response = await axios.post('https://jh.railwire.co.in/billcntl/endacctsession', payload, config);
 
         console.log(`Session reset response:`, response.data);
-
-        // First, check if the message indicates the session was not active.
         if (response.data.message && response.data.message.includes('-1')) {
             return 'NOT_ACTIVE';
         }
-        // If not, then check if the status is OK for a true success.
         else if (response.data.STATUS === 'OK') {
             return 'SUCCESS';
         }
-        // Anything else is an error.
         else {
             return 'ERROR';
         }
@@ -878,12 +861,12 @@ const waitForReply = async (originalMessage) => {
 
 const handlePlanChange = async (message) => {
     const chat = await message.getChat();
-    const messageBody = message.body; // Use original case for usernames
+    const messageBody = message.body;
 
     // 1. Define patterns for usernames, subscriber IDs (for checking), and package IDs
     const usernamePattern = /jh[\.\w]+/gi;
-    const subscriberIdPattern = /\b\d{5,}\b/g; // To detect if user sent a subscriber ID
-    const packageIdPattern = /\b\d{3,6}\b/g; // Package IDs can be 3 to 6 digits
+    const subscriberIdPattern = /\b\d{5,}\b/g;
+    const packageIdPattern = /\b\d{3,6}\b/g;
 
     // 2. Extract all potential matches
     const usernames = messageBody.match(usernamePattern) || [];
@@ -953,14 +936,14 @@ const handlePlanChange = async (message) => {
             });
 
             if (searchResults.length === 0) {
-                await chat.sendMessage(`❌ No user found for "${username}". Skipping.`);
+                await chat.sendMessage(`No user found for "${username}". Skipping.`);
                 continue;
             }
 
             const selectedUser = searchResults.find(user => user.username.toLowerCase() === username.toLowerCase());
 
             if (!selectedUser) {
-                await chat.sendMessage(`❌ No exact match found for "${username}". Found ${searchResults.length} partial matches. Skipping.`);
+                await chat.sendMessage(`No exact match found for "${username}". Found ${searchResults.length} partial matches. Skipping.`);
                 continue;
             }
 
@@ -983,14 +966,14 @@ const handlePlanChange = async (message) => {
             const planChanged = await ChangePlan(formData, selectedUser.username, cookies);
 
             if (planChanged) {
-                await chat.sendMessage(`✅ Plan changed successfully for *${selectedUser.username}* to Package ID *${desiredPkgId}*!`);
+                await chat.sendMessage(`Plan changed successfully for *${selectedUser.username}* to Package ID *${desiredPkgId}*!`);
             } else {
-                await chat.sendMessage(`❌ Failed to change plan for *${selectedUser.username}*. Check package ID and try again.`);
+                await chat.sendMessage(`Failed to change plan for *${selectedUser.username}*. Check package ID and try again.`);
             }
 
         } catch (error) {
             console.error(`Error processing plan change for ${username}:`, error.message);
-            await chat.sendMessage(`❌ An error occurred while processing plan change for *${username}*.`);
+            await chat.sendMessage(`An error occurred while processing plan change for *${username}*.`);
         }
     }
 };
@@ -1005,7 +988,6 @@ const handleSubscriberSearch = async (message, searchTerm) => {
 
     // Check if the data cache is loaded and ready
     if (!subscriberDataCache || subscriberDataCache.size === 0) {
-        await chat.sendMessage("Subscriber data is not loaded or is empty. Please check the server logs.");
         console.error("Attempted to search before subscriberDataCache was loaded or the file is empty.");
         return;
     }
@@ -1065,7 +1047,7 @@ const checkComplaintStatus = async (message) => {
     const complaintNumber = parseInt(compNoMsg.body.trim());
 
     if (isNaN(complaintNumber)) {
-        await chat.sendMessage("❌ Invalid Complaint Number.");
+        await chat.sendMessage("Invalid Complaint Number.");
         return;
     }
 
@@ -1074,7 +1056,7 @@ const checkComplaintStatus = async (message) => {
     try {
         loginResult = await login();
     } catch (err) {
-        await chat.sendMessage("❌ Failed to authenticate with backend.");
+        await chat.sendMessage("Failed to authenticate with backend.");
         return;
     }
 
@@ -1091,7 +1073,7 @@ const checkComplaintStatus = async (message) => {
         const complaint = complaints.find(c => c.ComplaintNumber === complaintNumber);
 
         if (!complaint) {
-            await chat.sendMessage(`❌ No complaint found with number ${complaintNumber}`);
+            await chat.sendMessage(`No complaint found with number ${complaintNumber}`);
             return;
         }
 
@@ -1167,10 +1149,10 @@ const handleAnpUpdate = async (message) => {
         });
 
         if (multipleMatches.length === 0) {
-            await chat.sendMessage(`❌ No ANP found matching "${searchTerm}".`);
+            await chat.sendMessage(`No ANP found matching "${searchTerm}".`);
             return;
         } else if (multipleMatches.length > 1) {
-            await chat.sendMessage(`❌ Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
+            await chat.sendMessage(`Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
             return;
         } else {
             match = multipleMatches[0];
@@ -1180,7 +1162,7 @@ const handleAnpUpdate = async (message) => {
         const phoneMessage = await waitForReply(message);
         const newPhoneNumber = phoneMessage.body.trim();
         if (!/^\d{10}$/.test(newPhoneNumber)) {
-            await chat.sendMessage("❌ Invalid phone number. Operation canceled.");
+            await chat.sendMessage("Invalid phone number. Operation canceled.");
             return;
         }
 
@@ -1188,7 +1170,7 @@ const handleAnpUpdate = async (message) => {
         const emailMessage = await waitForReply(message);
         const newEmail = emailMessage.body.trim().toLowerCase();
         if (!/\S+@\S+\.\S+/.test(newEmail)) {
-            await chat.sendMessage("❌ Invalid email format. Operation canceled.");
+            await chat.sendMessage("Invalid email format. Operation canceled.");
             return;
         }
 
@@ -1314,19 +1296,19 @@ const handleAnpUpdate = async (message) => {
             });
 
             if (updateResponse.data && (updateResponse.data.STATUS === "OK" || updateResponse.data.STATUS === "BANK VERIFIED")) {
-                await chat.sendMessage(`✅ ANP details updated successfully for *${match.name}*!`);
+                await chat.sendMessage(`ANP details updated successfully for *${match.name}*!`);
             } else {
                 const errorMsg = updateResponse.data ? (updateResponse.data.MESSAGE || updateResponse.data.STATUS) : "Unknown error";
-                await chat.sendMessage(`❌ Update failed for *${match.name}*. Server response: ${errorMsg}`);
+                await chat.sendMessage(`Update failed for *${match.name}*. Server response: ${errorMsg}`);
             }
         } else {
-            await chat.sendMessage("❌ Update canceled by user. No changes were made.");
+            await chat.sendMessage("Update canceled by user. No changes were made.");
             return;
         }
 
     } catch (error) {
         console.error("Error during ANP update:", error.message);
-        await chat.sendMessage("❌ An unexpected error occurred during the ANP update process.");
+        await chat.sendMessage("An unexpected error occurred during the ANP update process.");
     }
 };
 
@@ -1481,11 +1463,11 @@ const createSLATicket = async (message) => {
         const desc = descMessage.body.trim(); // Accepts multiline input
 
         // Step 5: Confirm sending without preview
-        await chat.sendMessage("✅ Do you want to send the request? Type *yes* or *no*.");
+        await chat.sendMessage("Do you want to send the request? Type *yes* or *no*.");
 
         const confirmMessage = await waitForReply(message);
         if (confirmMessage.body.trim().toLowerCase() !== 'yes') {
-            await chat.sendMessage("🚫 Request canceled.");
+            await chat.sendMessage("Request canceled.");
             return;
         }
 
@@ -1829,9 +1811,7 @@ async function ChangePlan(formData, username, cookies) {
 
 const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsDeactiveID) => {
     const session = userSessions.get(userIdentifier);
-    // Check for the new 'userCodes' array property
     if (!session || !session.userCodes || session.userCodes.length === 0) {
-        // If no codes are in session, do nothing.
         userSessions.delete(userIdentifier);
         return;
     }
@@ -1980,7 +1960,7 @@ const processAllForms = async (cookies, originalMessage) => {
 
         if (!isComplete) {
             console.log('Fetching Remaining Application Forms..');
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before refreshing
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
     }
 
@@ -2349,7 +2329,7 @@ const handleIncomingMessage = async (message) => {
     const SESSION_TIMEOUT_MS = 300000;
     const EXECUTION_DELAY_MS = 2780;
     const codePattern = /jh(\.\w+){2,}/gi;
-    const subscriberIdPattern = /(?<!\d)\b\d{4,6}\b(?!\d)/g;
+    const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
     const codesFromText = (messageBody.match(codePattern) || []).concat(messageBody.match(subscriberIdPattern) || []);
 
     const codesFromImage = await extractUsernamesFromImage(message);
@@ -2424,9 +2404,9 @@ const handleIncomingMessage = async (message) => {
         return;
     }
     if (messageBodyNoSpaces.includes('anpcheck')) {
-        await message.reply('ANP status check...');
+        await message.reply('Partner Link Update Started');
         await runAnpStatusCheckAndNotify();
-        await message.reply('Check completed');
+        await message.reply('Partner Link Update End');
         return;
     }
 
@@ -2464,9 +2444,9 @@ const handleIncomingMessage = async (message) => {
             await message.reply('Failed to authenticate. Please try again later.');
             return;
         }
-        await message.reply('Looking for KYC...');
+        await message.reply('eKYC Checking..');
         const totalProcessed = await processAllForms(cookies, message);
-        await message.reply(`Processed + Verified: ${totalProcessed}`);
+        await message.reply(`Completed: ${totalProcessed}`);
         return;
     }
 };
@@ -2519,7 +2499,6 @@ client.on('ready', () => {
                 console.error('Error downloading CSV:', error.message);
             }
 
-            // Send to all recipients
             for (const id of targetIds) {
                 try {
                     const chat = await client.getChatById(id);
@@ -2536,8 +2515,6 @@ client.on('ready', () => {
                     console.error(`Failed to send report to ID ${id}:`, err.message);
                 }
             }
-
-            // Clean up the temporary file after sending to all recipients
             if (csvMedia) {
                 try {
                     const today = new Date();
@@ -2575,18 +2552,20 @@ client.on('message', (message) => {
     handleIncomingMessage(message);
 });
 
-const formatDuration = (ms) => {
-    if (ms < 0) ms = 0;
-    const totalMinutes = Math.floor(ms / 60000);
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    let str = '';
-    if (hours > 0) str += `${hours} hour${hours > 1 ? 's' : ''}`;
-    if (minutes > 0) str += `${hours > 0 ? ' and ' : ''}${minutes} minute${minutes > 1 ? 's' : ''}`;
-    return str === '' ? 'for less than a minute' : `for ${str}`;
+const processInBatches = async (items, asyncFn, batchSize = 15) => {
+    let results = [];
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batchItems = items.slice(i, i + batchSize);
+        const batchPromises = batchItems.map(item => asyncFn(item));
+        const batchResults = await Promise.all(batchPromises);
+        results = results.concat(batchResults);
+    }
+    return results;
 };
 
 const getNmsSession = async (billingCookies) => {
+    if (cachedNmsCookie) return cachedNmsCookie;
+
     const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
     const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
 
@@ -2597,7 +2576,10 @@ const getNmsSession = async (billingCookies) => {
     const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
 
     if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
-    return headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+    const nmsCookie = headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+
+    cachedNmsCookie = nmsCookie;
+    return nmsCookie;
 };
 
 const getAllPartners = async (billingCookies) => {
@@ -2651,30 +2633,32 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
     }
 };
 
-const runAnpStatusCheckAndNotify = async () => {
+const runAnpStatusCheckAndNotify = async (isRetry = false) => {
     try {
         const billingCookies = await getCookies();
         if (!billingCookies) throw new Error("ANP Checker: Main auth failed.");
         const nmsCookie = await getNmsSession(billingCookies);
         const allPartners = await getAllPartners(billingCookies);
         const extraDetails = loadPartnerLiveDetails();
+        const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
+        const checkPartnerStatus = async (partner) => {
+            const liveCount = await getLiveOnlineCount(partner.id, nmsCookie);
+            return { ...partner, live_subs: liveCount };
+        };
+        const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
 
         const currentProblemPartners = new Map();
         const recoveredPartners = [];
 
-        for (const p of allPartners) {
-            if (p.total_subs === 0) continue;
-            const liveCount = await getLiveOnlineCount(p.id, nmsCookie);
-            const isDown = liveCount === 'Error' || (liveCount !== null && liveCount < (p.total_subs * (ANP_CONFIG.THRESHOLD_PERCENTAGE / 100)));
+        for (const p of partnerResults) {
+            const isDown = p.live_subs === 'Error' || p.live_subs === 0;
 
             if (isDown) {
-                p.live_subs = liveCount;
                 currentProblemPartners.set(p.id, p);
             } else if (downPartnersState.has(p.id)) {
                 recoveredPartners.push(downPartnersState.get(p.id).details);
                 downPartnersState.delete(p.id);
             }
-            await new Promise(resolve => setTimeout(resolve, 50));
         }
 
         const newAlerts = [], stillDownAlerts = [];
@@ -2682,23 +2666,23 @@ const runAnpStatusCheckAndNotify = async () => {
 
         for (const p of reportable) {
             if (downPartnersState.has(p.id)) {
-                const duration = formatDuration(Date.now() - downPartnersState.get(p.id).firstSeen);
-                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs}) is down ${duration}.`);
+                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs}) is still down.`);
             } else {
                 downPartnersState.set(p.id, { firstSeen: Date.now(), details: p });
                 newAlerts.push(p);
             }
         }
 
+        // --- Alert sending logic (unchanged structure) ---
         if (recoveredPartners.length > 0) {
-            let msg = `*Detected: ANP Link UP*\n`;
+            let msg = `*BOT Detected: Partner-Link Up*\n`;
             recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*` });
             await sendAnpAlert(msg);
         }
         if (stillDownAlerts.length > 0) {
-            const ONE_HOUR_MS = 60 * 60 * 1000;
+            const ONE_HOUR_MS = 90 * 60 * 1000;
             if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
-                await sendAnpAlert(`*ANP Still Down Report*\n\n${stillDownAlerts.join('\n')}`);
+                await sendAnpAlert(`*Still ANPs Down Report!*\n\n${stillDownAlerts.join('\n')}`);
                 lastStillDownReportTime = Date.now();
             }
         }
@@ -2707,12 +2691,12 @@ const runAnpStatusCheckAndNotify = async () => {
             for (const p of newAlerts) {
                 const details = extraDetails[p.id] || {};
                 const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
-                let msg = `*Detected: ANP Link Down*\n\n` +
+                let msg = `*BOT Detected: Partner Link-Down*\n\n` +
                     `*Name:* ${p.name} (${details['District'] || 'N/A'})\n` +
-                    `*Subs:* ${liveSubsDisplay} / ${p.total_subs}\n` +
+                    `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n` +
                     `*Contact:* ${details['Contact No'] || 'N/A'}\n` +
                     `*VLAN (S/C):* ${details['Stack VLAN'] || 'N/A'} / ${details['Customer VLAN'] || 'N/A'}\n` +
-                    `*Code:* ${details['JH Code'] || 'N/A'}\n` +
+                    `*JH Code:* ${details['JH Code'] || 'N/A'}\n` +
                     `*Port:* ${details['Primary Port'] || 'N/A'}\n` +
                     `*BNG:* ${details['BNG'] || 'N/A'}`;
 
@@ -2725,6 +2709,14 @@ const runAnpStatusCheckAndNotify = async () => {
         }
     } catch (error) {
         console.error("ANP Check CRITICAL ERROR:", error.message);
+        if (!isRetry) {
+            console.log("ANP Checker: Session may have expired. Clearing caches and retrying once...");
+            cachedSessionCookies = null;
+            cachedNmsCookie = null;
+            return runAnpStatusCheckAndNotify(true);
+        } else {
+            console.error("ANP Checker: Retry failed. The issue is likely persistent.");
+        }
     }
 };
 
