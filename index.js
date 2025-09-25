@@ -65,7 +65,6 @@ let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
-    THRESHOLD_PERCENTAGE: 1,
     TARGET_ID: '916200493605@c.us',
     GROUP_NAME: 'Super Bot - LightWave',
     EXCEL_FILE_NAME: 'PartnerLive.xlsx',
