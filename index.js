@@ -133,17 +133,19 @@ const formatTicketMessage = (details) => {
         `*Partner:* ${details.partnerName}\n`;
 
     if (details.messages.length > 0) {
-        message += `\n`; // Add a space before the first message
+        message += `\n`; // Add a space before the first message line
+        
         details.messages.forEach(msg => {
-            const timePart = msg.timestamp.split(' on ')[0] || msg.timestamp;
-            const singleLineMessage = msg.content.replace(/\n/g, ' '); // Replace newlines with spaces
+            const timePart = (msg.timestamp.split(' on ')[0] || msg.timestamp).toLowerCase();
+            
+            const messageBody = `${msg.author}: ${msg.content.replace(/\r?\n|\r/g, ' ')}`;
 
-            message += `${timePart}: ${msg.author}: ${singleLineMessage}\n`;
+            message += `${timePart}: ${messageBody}\n`;
         });
     }
 
     return message.trim();
-};
+};y
 
 
 const getTicketDetails = async (ticketUrl, cookies) => {
