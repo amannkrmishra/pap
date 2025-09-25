@@ -2397,15 +2397,22 @@ const handleIncomingMessage = async (message) => {
         await message.reply(replyMessage);
         return;
     }
+
     if (messageBody.startsWith('search ')) {
         const searchTerm = message.body.substring(7).trim();
         await handleSubscriberSearch(message, searchTerm);
         return;
     }
-    if (messageBodyNoSpaces.includes('anpcheck')) {
-        await message.reply('Partner Link Update Started');
-        await runAnpStatusCheckAndNotify();
-        await message.reply('Partner Link Update End');
+
+    if (messageBodyNoSpaces.includes('anpcheck') || messageBodyNoSpaces.includes('apncheck')) {
+        await message.reply('ANP Status Check Started...');
+        try {
+            await runAnpStatusCheckAndNotify(false, 'manual');
+            await message.reply('ANP Status Check Completed ✅');
+        } catch (error) {
+            console.error('Manual ANP check failed:', error.message);
+            await message.reply('ANP Status Check Failed ❌');
+        }
         return;
     }
 
@@ -2572,6 +2579,7 @@ const getNmsSession = async (billingCookies) => {
     const nmsUsername = $('#srvs_redi input[name="username"]').val();
     const nmsPassword = $('#srvs_redi input[name="password"]').val();
     if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
+
     const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
 
     if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
@@ -2632,18 +2640,54 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
     }
 };
 
-const runAnpStatusCheckAndNotify = async (isRetry = false) => {
+const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron') => {
+    const startTime = new Date();
+    const timeStamp = startTime.toLocaleTimeString('en-US', {
+        hour12: true,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+
+    console.log(`\n==================== ANP CHECK START ====================`);
+    console.log(`Triggered by: ${triggeredBy} | Time: ${timeStamp}`);
+
     try {
+        console.log(`Getting authentication cookies...`);
         const billingCookies = await getCookies();
         if (!billingCookies) throw new Error("ANP Checker: Main auth failed.");
+
+        console.log(`Getting NMS session...`);
         const nmsCookie = await getNmsSession(billingCookies);
+
+        console.log(`Fetching all partners...`);
         const allPartners = await getAllPartners(billingCookies);
+        console.log(`Found ${allPartners.length} total partners`);
+
         const extraDetails = loadPartnerLiveDetails();
         const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
+        console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
+
         const checkPartnerStatus = async (partner) => {
+            const checkStartTime = new Date().toLocaleTimeString('en-US', {
+                hour12: true,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+
             const liveCount = await getLiveOnlineCount(partner.id, nmsCookie);
+
+            // Enhanced console logging for each partner
+            const status = liveCount === 'Error' ? 'ERROR' :
+                liveCount === 0 ? 'DOWN' :
+                    liveCount < partner.total_subs * 0.8 ? 'LOW' : 'OK';
+
+            console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status} | Time checked: ${checkStartTime}`);
+
             return { ...partner, live_subs: liveCount };
         };
+
         const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
 
         const currentProblemPartners = new Map();
@@ -2672,22 +2716,32 @@ const runAnpStatusCheckAndNotify = async (isRetry = false) => {
             }
         }
 
-        // --- Alert sending logic (unchanged structure) ---
+        // Alert sending logic
         if (recoveredPartners.length > 0) {
+            console.log(`\n${recoveredPartners.length} partners recovered:`);
             let msg = `*BOT Detected: Partner-Link Up*\n`;
-            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*` });
+            recoveredPartners.forEach(p => {
+                console.log(`  ✅ ${p.name}`);
+                msg += `\n✅ *${p.name}*`;
+            });
             await sendAnpAlert(msg);
         }
+
         if (stillDownAlerts.length > 0) {
             const ONE_HOUR_MS = 90 * 60 * 1000;
             if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
+                console.log(`\n${stillDownAlerts.length} partners still down (sending hourly report):`);
+                stillDownAlerts.forEach(alert => console.log(`  ${alert}`));
                 await sendAnpAlert(`*Still ANPs Down Report!*\n\n${stillDownAlerts.join('\n')}`);
                 lastStillDownReportTime = Date.now();
             }
         }
+
         if (newAlerts.length > 0) {
+            console.log(`\n${newAlerts.length} new alerts:`);
             newAlerts.sort((a, b) => a.name.localeCompare(b.name));
             for (const p of newAlerts) {
+                console.log(`  🔴 ${p.name} - ${p.live_subs}/${p.total_subs} subscribers`);
                 const details = extraDetails[p.id] || {};
                 const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
                 let msg = `*BOT Detected: Partner Link-Down*\n\n` +
@@ -2703,18 +2757,30 @@ const runAnpStatusCheckAndNotify = async (isRetry = false) => {
                 await new Promise(resolve => setTimeout(resolve, 100));
             }
         }
+
         if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
-            console.log("ANP Checker: All partners healthy.");
+            console.log(`✅ All partners healthy - no issues detected`);
         }
+
+        const endTime = new Date();
+        const duration = ((endTime - startTime) / 1000).toFixed(2);
+        console.log(`==================== ANP CHECK END ====================`);
+        console.log(`Total duration: ${duration} seconds | Completed: ${endTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' })}\n`);
+
     } catch (error) {
-        console.error("ANP Check CRITICAL ERROR:", error.message);
+        console.error(`\n🔴 ANP Check CRITICAL ERROR: ${error.message}`);
+
         if (!isRetry) {
-            console.log("ANP Checker: Session may have expired. Clearing caches and retrying once...");
+            console.log(`🔄 Session may have expired. Clearing caches and retrying once...`);
             cachedSessionCookies = null;
             cachedNmsCookie = null;
-            return runAnpStatusCheckAndNotify(true);
+
+            // Wait a bit before retry
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            return runAnpStatusCheckAndNotify(true, triggeredBy);
         } else {
-            console.error("ANP Checker: Retry failed. The issue is likely persistent.");
+            console.error(`❌ ANP Checker: Retry failed. The issue is likely persistent.`);
+            console.log(`==================== ANP CHECK FAILED ====================\n`);
         }
     }
 };
