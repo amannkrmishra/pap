@@ -54,18 +54,14 @@ const {
 const cheerio = require('cheerio');
 const XLSX = require('xlsx');
 const userSessions = new Map();
-let cachedSessionCookies = null;
 let partnerMappings = null;
-const COOKIE_CLEANUP_TIME = 600000; // 10 minutes
-let cachedNmsCookie = null; // New cache for the NMS session
-let cookieCleanupTimeout = null;
 let partnerIndex = null;
-let authenticationPromise = null;
-let nmsAuthenticationPromise = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
 let processedTicketIds = new Set();
+let sessionCache = null;
+let cacheTime = 0;
 const downPartnersState = new Map();
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
@@ -168,7 +164,6 @@ const getTicketDetails = async (ticketUrl, cookies) => {
         if (key === 'subscriber') subscriberUsername = value;
         if (key === 'status') details.status = value;
         if (key === 'time opened') details.timeOpened = value;
-        // NOTE: Partner Name scraping from this table is now REMOVED.
     });
 
     if (!subscriberUsername) return null;
@@ -181,12 +176,10 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     const portalUserData = await fetchUserDataFromPortal(subscriberUsername);
     details.customerMobile = portalUserData?.MobileNo || 'N/A';
 
-    // --- THIS IS THE KEY CHANGE ---
-    // Get Partner Name, District, and Cluster from the Subscribers.xlsx cache
     const cachedSubData = subscriberDataCache.get(normalize(subscriberUsername));
     details.district = cachedSubData?.['District'] || 'N/A';
     details.cluster = cachedSubData?.['Cluster'] || 'N/A';
-    details.partnerName = cachedSubData?.['ANP Name'] || 'N/A'; // Always use the name from the Excel file.
+    details.partnerName = cachedSubData?.['ANP Name'] || 'N/A';
 
     details.messages = [];
     $('h5.blue').each((i, authorElement) => {
@@ -206,40 +199,38 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     return details;
 };
 
-
 const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     console.log(`Running ticket check, triggered by: ${triggeredBy}...`);
     try {
-        const ticketsToProcess = await withApiAuth(async (cookies) => {
-            const client = axios.create({
-                baseURL: 'https://jh.railwire.co.in',
-                headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
-            });
-
-            const pageOffsets = ['', '30', '60', '90']; // Scrape 4 pages
-            const tickets = [];
-
-            for (const offset of pageOffsets) {
-                const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
-                const response = await client.get(url);
-                const $ = cheerio.load(response.data);
-
-                $('table#results tbody tr').each((i, row) => {
-                    const cells = $(row).find('td');
-                    const status = $(cells[7]).text().trim().toLowerCase();
-                    
-                    if (status === 'open' || status === 'progress') {
-                        const ticketId = $(cells[0]).contents().first().text().trim();
-                        const viewLink = $(cells[cells.length - 1]).find('a').attr('href');
-
-                        if (ticketId && viewLink && !processedTicketIds.has(ticketId)) {
-                            tickets.push({ ticketId, viewLink });
-                        }
-                    }
-                });
-            }
-            return tickets;
+        const cookies = await authenticate('admin', 'Pass@123');
+        const client = axios.create({
+            baseURL: 'https://jh.railwire.co.in',
+            headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
         });
+
+        const pageOffsets = ['', '30', '60', '90'];
+        const tickets = [];
+
+        for (const offset of pageOffsets) {
+            const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
+            const response = await client.get(url);
+            const $ = cheerio.load(response.data);
+
+            $('table#results tbody tr').each((i, row) => {
+                const cells = $(row).find('td');
+                const status = $(cells[7]).text().trim().toLowerCase();
+                
+                if (status === 'open' || status === 'progress') {
+                    const ticketId = $(cells[0]).contents().first().text().trim();
+                    const viewLink = $(cells[cells.length - 1]).find('a').attr('href');
+
+                    if (ticketId && viewLink && !processedTicketIds.has(ticketId)) {
+                        tickets.push({ ticketId, viewLink });
+                    }
+                }
+            });
+        }
+        const ticketsToProcess = tickets;
 
         if (ticketsToProcess.length === 0) {
             console.log('No new "Open" or "Progress" tickets found.');
@@ -248,18 +239,20 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
 
         for (const ticket of ticketsToProcess) {
             console.log(`Found new ticket: #${ticket.ticketId}. Fetching details...`);
-            const ticketDetails = await withApiAuth(cookies => getTicketDetails(ticket.viewLink, cookies));
+            const freshCookiesForDetails = await authenticate('admin', 'Pass@123');
+            const ticketDetails = await getTicketDetails(ticket.viewLink, freshCookiesForDetails);
             
             if (ticketDetails) {
                 const formattedMessage = formatTicketMessage(ticketDetails);
                 await sendTicketAlert(formattedMessage);
-                processedTicketIds.add(ticket.ticketId); // Mark as processed to avoid re-sending
+                processedTicketIds.add(ticket.ticketId);
             }
         }
     } catch (error) {
         console.error('Error during ticket monitoring:', error.message);
     }
 };
+
 
 const generateRandomEmail = (username) => {
     if (!username || typeof username !== 'string') {
@@ -442,28 +435,28 @@ const loadPartnerMappings = (filename = 'TicketMappingANP.xlsx') => {
 
 const getSubscriberCount = async () => {
     try {
-        return await withApiAuth(async (cookies) => {
-            const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-            const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
+        const cookies = await authenticate('admin', 'Pass@123');
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
 
-            const response = await axios.get(dashboardUrl, {
-                headers: { 'Cookie': cookieString },
-                timeout: 15000
-            });
-
-            const $ = cheerio.load(response.data);
-            const subscriberCount = $('.infobox-content:contains("active subscribers")')
-                .siblings('.infobox-data-number')
-                .text()
-                .trim();
-
-            return subscriberCount || 'Count not found.';
+        const response = await axios.get(dashboardUrl, {
+            headers: { 'Cookie': cookieString },
+            timeout: 15000
         });
+
+        const $ = cheerio.load(response.data);
+        const subscriberCount = $('.infobox-content:contains("active subscribers")')
+            .siblings('.infobox-data-number')
+            .text()
+            .trim();
+
+        return subscriberCount || 'Count not found.';
     } catch (error) {
         console.error('Error fetching subscriber count after retries:', error.message);
         return 'Could not retrieve count.';
     }
 };
+
 
 const loadExcelData = () => {
     if (jhCodeMap) return;
@@ -499,6 +492,7 @@ const loadExcelData = () => {
     }
 };
 
+
 const handleSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
     try {
@@ -533,22 +527,21 @@ const handleSubscriberUpdate = async (message) => {
             return;
         }
 
-        const responseData = await withApiAuth(async (cookies) => {
-            const payload = new URLSearchParams({
-                'cnumber': newPhoneNumber,
-                'cemail': newEmail,
-                'id': userData.SubscriberId,
-                'railwire_test_name': cookies.railwireCookie.value
-            });
-            const config = {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                }
-            };
-            const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
-            return response.data;
+        const cookies = await authenticate('admin', 'Pass@123');
+        const payload = new URLSearchParams({
+            'cnumber': newPhoneNumber,
+            'cemail': newEmail,
+            'id': userData.SubscriberId,
+            'railwire_test_name': cookies.railwireCookie.value
         });
+        const config = {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        };
+        const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+        const responseData = response.data;
 
         if (responseData && responseData.STATUS === "OK") {
             await chat.sendMessage(`Details have been updated successfully for *${userData.Username}*!`);
@@ -562,6 +555,8 @@ const handleSubscriberUpdate = async (message) => {
         await chat.sendMessage("An unexpected error occurred during the update process.");
     }
 };
+
+
 const handleBulkSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
     const userIdentifier = getUserIdentifier(message);
@@ -584,22 +579,21 @@ const handleBulkSubscriberUpdate = async (message) => {
             const newPhoneNumber = generateRandomMobile();
             const newEmail = generateRandomEmail(userData.Username);
 
-            const responseData = await withApiAuth(async (cookies) => {
-                const payload = new URLSearchParams({
-                    'cnumber': newPhoneNumber,
-                    'cemail': newEmail,
-                    'id': userData.SubscriberId,
-                    'railwire_test_name': cookies.railwireCookie.value
-                });
-                const config = {
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                    }
-                };
-                const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
-                return response.data;
+            const cookies = await authenticate('admin', 'Pass@123');
+            const payload = new URLSearchParams({
+                'cnumber': newPhoneNumber,
+                'cemail': newEmail,
+                'id': userData.SubscriberId,
+                'railwire_test_name': cookies.railwireCookie.value
             });
+            const config = {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                }
+            };
+            const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+            const responseData = response.data;
 
             if (responseData && responseData.STATUS === "OK") {
             let reply = `*Username:* ${userData.Username}\n`;
@@ -621,78 +615,6 @@ const handleBulkSubscriberUpdate = async (message) => {
     await chat.sendMessage("Bulk update process finished.");
 };
 
-const withApiAuth = async (apiCallLogic, ...args) => {
-    const cookies = await getCookies();
-    if (!cookies) {
-        throw new Error("Authentication failed - could not get valid session cookies");
-    }
-    
-    return await apiCallLogic(cookies, ...args);
-};
-
-const getCookies = async () => {
-    if (authenticationPromise) {
-        console.log('[Auth] An Auth. in Progress...');
-        return await authenticationPromise;
-    }
-
-    if (cachedSessionCookies) {
-        console.log('[Auth] Cache Cookies Found. Checking..');
-        const isValid = await validateCookies(cachedSessionCookies);
-        if (isValid) {
-            console.log('[Auth] Cached cookies are valid, using them.');
-            return cachedSessionCookies;
-        } else {
-            console.log('[Auth] Cached cookies expired, clearing cache.');
-            cachedSessionCookies = null;
-            if (cookieCleanupTimeout) {
-                clearTimeout(cookieCleanupTimeout);
-                cookieCleanupTimeout = null;
-            }
-        }
-    }
-    authenticationPromise = (async () => {
-        try {
-            console.log('[Auth] Performing Fresh Auth..');
-            const { railwireCookie, ciSessionCookie } = await authenticate('admin', 'Pass@123');
-            cachedSessionCookies = { railwireCookie, ciSessionCookie };
-            
-            if (cookieCleanupTimeout) clearTimeout(cookieCleanupTimeout);
-            cookieCleanupTimeout = setTimeout(() => {
-                console.log('[Auth] Cache timeout reached, clearing cookies');
-                cachedSessionCookies = null;
-                cookieCleanupTimeout = null;
-            }, COOKIE_CLEANUP_TIME);
-            
-            return cachedSessionCookies;
-        } catch (err) {
-            console.error('[Auth] Fresh authentication failed:', err.message);
-            return null;
-        } finally {
-            authenticationPromise = null;
-        }
-    })();
-    return await authenticationPromise;
-};
-
-const validateCookies = async (cookies) => {
-    try {
-        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-        const response = await axios.get('https://jh.railwire.co.in/billcntl/kycrejected', {
-            headers: { 'Cookie': cookieString },
-            timeout: 10000,
-            maxRedirects: 0,
-            validateStatus: status => true // Accept any status code
-        });
-        
-        console.log(`[Auth] Cookie validation response: ${response.status}`);
-        return response.status === 200;
-    } catch (error) {
-        console.log(`[Auth] Cookie validation error: ${error.message}`);
-        return false;
-    }
-};
-
 
 const baseURL = 'https://jh.railwire.co.in';
 const mainURL = `${baseURL}/billcntl/kycpending`;
@@ -707,6 +629,13 @@ const generateQRCode = (qr) => {
 
 
 const authenticate = async (username, password) => {
+    if (sessionCache && Date.now() - cacheTime < 1500000) return sessionCache;
+    sessionCache = await originalAuthenticate(username, password);
+    cacheTime = Date.now();
+    return sessionCache;
+};
+
+const originalAuthenticate = async (username, password) => {
     return retryOperation(async () => {
         let sessionCookies = {};
 
@@ -848,69 +777,68 @@ async function retryOperation(operation, maxRetries = 5, delay = 1000) {
 
 async function fetchUserDataFromPortal(userCode) {
     try {
-        return await withApiAuth(async (cookies) => {
-            const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-            const payload = new URLSearchParams({
-                'railwire_test_name': cookies.railwireCookie.value,
-                'user-search': userCode
-            });
-
-            const searchResponse = await axios.post(
-                'https://jh.railwire.co.in/billcntl/searchsub ',
-                payload.toString(), {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': cookieString,
-                },
-                maxRedirects: 0,
-                validateStatus: status => status >= 200 && status < 400,
-            }
-            );
-
-            let finalUrl = searchResponse.headers.location;
-            if (!finalUrl || !finalUrl.startsWith('/')) return null;
-            finalUrl = `https://jh.railwire.co.in${finalUrl}`;
-
-            const tableResponse = await axios.get(finalUrl, { headers: { Cookie: cookieString } });
-            const $ = cheerio.load(tableResponse.data);
-            const row = $('table.table-striped tbody tr').first();
-            if (!row.length) return null;
-
-            const cells = row.find('td');
-            if (cells.length < 6) return null;
-
-            const usernameAnchor = cells.eq(1).find('a');
-            const userDetailHref = usernameAnchor.attr('href');
-            const userDetailUrl = `https://jh.railwire.co.in${userDetailHref}`;
-
-            let name = '';
-            try {
-                const detailResponse = await axios.get(userDetailUrl, { headers: { Cookie: cookieString } });
-                const $$ = cheerio.load(detailResponse.data);
-                $$('.table-bordered.table-condensed.table-striped tr').each((_, tr) => {
-                    const key = $$(tr).find('td').first().text().trim();
-                    if (key === 'Name') {
-                        name = $$(tr).find('td').eq(1).text().trim();
-                    }
-                });
-            } catch (err) {
-                console.error('Failed to fetch user detail page:', err.message);
-            }
-
-            const userData = {
-                username: usernameAnchor.text().trim(),
-                mobileNo: cells.eq(5).text().trim(),
-                id: cells.eq(0).text().trim(),
-                name: name
-            };
-
-            return userData ? {
-                Username: userData.username,
-                MobileNo: userData.mobileNo,
-                SubscriberId: userData.id,
-                Name: userData.name
-            } : null;
+        const cookies = await authenticate('admin', 'Pass@123');
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        const payload = new URLSearchParams({
+            'railwire_test_name': cookies.railwireCookie.value,
+            'user-search': userCode
         });
+
+        const searchResponse = await axios.post(
+            'https://jh.railwire.co.in/billcntl/searchsub ',
+            payload.toString(), {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': cookieString,
+            },
+            maxRedirects: 0,
+            validateStatus: status => status >= 200 && status < 400,
+        }
+        );
+
+        let finalUrl = searchResponse.headers.location;
+        if (!finalUrl || !finalUrl.startsWith('/')) return null;
+        finalUrl = `https://jh.railwire.co.in${finalUrl}`;
+
+        const tableResponse = await axios.get(finalUrl, { headers: { Cookie: cookieString } });
+        const $ = cheerio.load(tableResponse.data);
+        const row = $('table.table-striped tbody tr').first();
+        if (!row.length) return null;
+
+        const cells = row.find('td');
+        if (cells.length < 6) return null;
+
+        const usernameAnchor = cells.eq(1).find('a');
+        const userDetailHref = usernameAnchor.attr('href');
+        const userDetailUrl = `https://jh.railwire.co.in${userDetailHref}`;
+
+        let name = '';
+        try {
+            const detailResponse = await axios.get(userDetailUrl, { headers: { Cookie: cookieString } });
+            const $$ = cheerio.load(detailResponse.data);
+            $$('.table-bordered.table-condensed.table-striped tr').each((_, tr) => {
+                const key = $$(tr).find('td').first().text().trim();
+                if (key === 'Name') {
+                    name = $$(tr).find('td').eq(1).text().trim();
+                }
+            });
+        } catch (err) {
+            console.error('Failed to fetch user detail page:', err.message);
+        }
+
+        const userData = {
+            username: usernameAnchor.text().trim(),
+            mobileNo: cells.eq(5).text().trim(),
+            id: cells.eq(0).text().trim(),
+            name: name
+        };
+
+        return userData ? {
+            Username: userData.username,
+            MobileNo: userData.mobileNo,
+            SubscriberId: userData.id,
+            Name: userData.name
+        } : null;
     } catch (error) {
         console.error(`Error fetching portal data for ${userCode} after retries:`, error.message);
         return null;
@@ -919,17 +847,16 @@ async function fetchUserDataFromPortal(userCode) {
 
 const resetSession = async (userData) => {
     try {
-        const responseData = await withApiAuth(async (cookies) => {
-            const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
-            const config = {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                }
-            };
-            const response = await axios.post('https://jh.railwire.co.in/billcntl/endacctsession', payload, config);
-            return response.data;
-        });
+        const cookies = await authenticate('admin', 'Pass@123');
+        const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
+        const config = {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        };
+        const response = await axios.post('https://jh.railwire.co.in/billcntl/endacctsession', payload, config);
+        const responseData = response.data;
 
         console.log(`Session reset response:`, responseData);
         if (responseData.message && responseData.message.includes('-1')) {
@@ -947,17 +874,16 @@ const resetSession = async (userData) => {
 
 const DeactivateID = async (userData) => {
     try {
-        const responseData = await withApiAuth(async (cookies) => {
-            const payload = `subid=${userData.SubscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
-            const config = {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                }
-            };
-            const response = await axios.post('https://jh.railwire.co.in/billcntl/update_expiry', payload, config);
-            return response.data;
-        });
+        const cookies = await authenticate('admin', 'Pass@123');
+        const payload = `subid=${userData.SubscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
+        const config = {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        };
+        const response = await axios.post('https://jh.railwire.co.in/billcntl/update_expiry', payload, config);
+        const responseData = response.data;
         console.log(`Account activated / deactivated status: ${responseData.STATUS}`);
         return responseData.STATUS === 'OK';
     } catch (error) {
@@ -968,30 +894,28 @@ const DeactivateID = async (userData) => {
 
 const resetPassword = async (userData) => {
     try {
-        return await withApiAuth(async (cookies) => {
-            const config = {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                }
-            };
-            const basePayload = `subid=${userData.SubscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
-            const [portalRes, pppoeRes] = await Promise.all([
-                axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Bill`, config),
-                axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Internet`, config)
-            ]);
-            console.log(`Portal: ${portalRes.data.STATUS} | PPPoE: ${pppoeRes.data.STATUS}`);
-            return {
-                portalReset: portalRes.data.STATUS === 'OK',
-                pppoeReset: pppoeRes.data.STATUS === 'OK'
-            };
-        });
+        const cookies = await authenticate('admin', 'Pass@123');
+        const config = {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        };
+        const basePayload = `subid=${userData.SubscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
+        const [portalRes, pppoeRes] = await Promise.all([
+            axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Bill`, config),
+            axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Internet`, config)
+        ]);
+        console.log(`Portal: ${portalRes.data.STATUS} | PPPoE: ${pppoeRes.data.STATUS}`);
+        return {
+            portalReset: portalRes.data.STATUS === 'OK',
+            pppoeReset: pppoeRes.data.STATUS === 'OK'
+        };
     } catch (error) {
         console.error('Password reset error after retries:', error.message);
         return { portalReset: false, pppoeReset: false };
     }
 };
-
 
 const getUserIdentifier = (message) => {
     return message.fromMe ? message.to : (message.author || message.from);
@@ -1039,48 +963,54 @@ const handlePlanChange = async (message) => {
 
     for (const username of usernames) {
         try {
-            const formData = await withApiAuth(async (cookies) => {
-                const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-                const payload = new URLSearchParams({
-                    'railwire_test_name': cookies.railwireCookie.value,
-                    'user-search': username
-                });
-                const searchResponse = await axios.post(
-                    'https://jh.railwire.co.in/billcntl/searchsub ',
-                    payload.toString(), {
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookieString },
-                    maxRedirects: 0,
-                    validateStatus: status => status >= 200 && status < 400
-                }
-                );
-                const finalUrl = `https://jh.railwire.co.in${searchResponse.headers.location}`;
-                const tableResponse = await axios.get(finalUrl, { headers: { 'Cookie': cookieString } });
-                const $ = cheerio.load(tableResponse.data);
-                const searchResults = [];
-                $('table.table-striped tbody tr').each(function () {
-                    const row = $(this);
-                    const foundUsername = row.find('td:nth-child(2) a').text().trim();
-                    const link = row.find('td:nth-child(2) a').attr('href');
-                    if (foundUsername && link) {
-                        searchResults.push({ username: foundUsername, link });
-                    }
-                });
-                if (searchResults.length === 0) return { error: `No user found for "${username}".` };
-                const selectedUser = searchResults.find(user => user.username.toLowerCase() === username.toLowerCase());
-                if (!selectedUser) return { error: `No exact match for "${username}". Found ${searchResults.length} partial matches.` };
-
-                const detailUrl = `https://jh.railwire.co.in${selectedUser.link}`;
-                const detailPage = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
-                const $$ = cheerio.load(detailPage.data);
-                return {
-                    subid: $$('#subid').val() || '',
-                    status: $$('#status').val() || '',
-                    oldpkgid: $$('#oldpackageid').val() || '',
-                    verifyHidden: $$('#verifyHidden').val() || '',
-                    pkgid: desiredPkgId,
-                    username: selectedUser.username
-                };
+            const cookies = await authenticate('admin', 'Pass@123');
+            const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+            const payload = new URLSearchParams({
+                'railwire_test_name': cookies.railwireCookie.value,
+                'user-search': username
             });
+            const searchResponse = await axios.post(
+                'https://jh.railwire.co.in/billcntl/searchsub ',
+                payload.toString(), {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookieString },
+                maxRedirects: 0,
+                validateStatus: status => status >= 200 && status < 400
+            }
+            );
+            const finalUrl = `https://jh.railwire.co.in${searchResponse.headers.location}`;
+            const tableResponse = await axios.get(finalUrl, { headers: { 'Cookie': cookieString } });
+            const $ = cheerio.load(tableResponse.data);
+            const searchResults = [];
+            $('table.table-striped tbody tr').each(function () {
+                const row = $(this);
+                const foundUsername = row.find('td:nth-child(2) a').text().trim();
+                const link = row.find('td:nth-child(2) a').attr('href');
+                if (foundUsername && link) {
+                    searchResults.push({ username: foundUsername, link });
+                }
+            });
+
+            let formData;
+            if (searchResults.length === 0) {
+                formData = { error: `No user found for "${username}".` };
+            } else {
+                const selectedUser = searchResults.find(user => user.username.toLowerCase() === username.toLowerCase());
+                if (!selectedUser) {
+                    formData = { error: `No exact match for "${username}". Found ${searchResults.length} partial matches.` };
+                } else {
+                    const detailUrl = `https://jh.railwire.co.in${selectedUser.link}`;
+                    const detailPage = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
+                    const $$ = cheerio.load(detailPage.data);
+                    formData = {
+                        subid: $$('#subid').val() || '',
+                        status: $$('#status').val() || '',
+                        oldpkgid: $$('#oldpackageid').val() || '',
+                        verifyHidden: $$('#verifyHidden').val() || '',
+                        pkgid: desiredPkgId,
+                        username: selectedUser.username
+                    };
+                }
+            }
 
             if (formData.error) {
                 await chat.sendMessage(formData.error + " Skipping.");
@@ -1223,7 +1153,6 @@ const checkComplaintStatus = async (message) => {
     }
 };
 
-
 const handleAnpUpdate = async (message) => {
     const chat = await message.getChat();
     try {
@@ -1234,61 +1163,62 @@ const handleAnpUpdate = async (message) => {
             return;
         }
 
-        const { match, payloadData } = await withApiAuth(async (cookies) => {
-            const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-            const listUrl = `${baseURL}/billcntl/billpartners`;
-            const listResponse = await axios.get(listUrl, { headers: { 'Cookie': cookieString } });
-            const $ = cheerio.load(listResponse.data);
-            let foundMatch = null;
-            let multipleMatches = [];
-            const normalizedSearch = normalize(searchTerm);
-            $('table#dynamic-table tbody tr').each(function () {
-                const row = $(this);
-                const partnerId = normalize(row.find('td').eq(0).text());
-                const companyName = normalize(row.find('td').eq(1).find('a').text());
-                if (partnerId === normalizedSearch || companyName === normalizedSearch) {
-                    multipleMatches.push({
-                        name: row.find('td').eq(1).find('a').text().trim(),
-                        id: row.find('td').eq(0).text().trim(),
-                        link: row.find('td').eq(1).find('a').attr('href')
-                    });
-                }
-            });
-            if (multipleMatches.length === 0) return { error: `No ANP found matching "${searchTerm}".` };
-            if (multipleMatches.length > 1) return { error: `Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}` };
-            foundMatch = multipleMatches[0];
-
-            const detailUrl = baseURL + foundMatch.link;
-            const detailResponse = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
-            const $$ = cheerio.load(detailResponse.data);
-            const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
-            const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
-            const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
-            let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
-            let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
-
-            const data = {
-                'railwire_test_name': cookies.railwireCookie.value,
-                'partnerid': scrapeHidden('partnerid'), 'cname': scrapeValue("Company Name"), 'cregno': scrapeValue("Company Registration Number"),
-                'caddress': scrapeHtml('caddress'), 'cmanager': scrapeValue("Contact Person"), 'agreementdate': scrapeValue("Railwire Agreement Date"),
-                'agreementno': scrapeValue("Railwire Agreement No"), 'pancard': scrapeHidden('pancard'), 'bank_acholder': scrapeValue("Bank Account Holder Name"),
-                'bank_actype': scrapeValue("Bank Account Type"), 'bank_name': scrapeHtml('bank_name'), 'bank_branch': scrapeHtml('bank_branch'),
-                'bank_acno': scrapeValue("Bank Account No"), 'bank_ifsc': scrapeHidden('bank_ifsc'), 'gstin': gstin, 'sacno': scrapeValue("SAC No"),
-                'ptype': scrapeHtml('ptype'), 'gst_status': scrapeHidden("gststatus1"), 'legalname': scrapeHidden("legalnameval"),
-                'tradename': scrapeHidden("tradenameval"), 'ptnrattid': scrapeHtml('ptnrattid'), 'ptnrlang': scrapeHtml('ptnrlang'),
-                'territory_name': scrapeHidden('territory_name'), 'ring': scrapeValue("Ring"), 'brasip': scrapeValue("BRAS IP"),
-                'switchip': scrapeValue("Switch IP"), 'dropping': scrapeValue("Dropping"), 'interface': scrapeValue("Interface"),
-                'port_number': scrapeValue("Port Number"), 'pop_name': scrapeValue("Pop Name"), 'pop_pincode': scrapeValue("Pop Pin Code"),
-                'ngcomany': scrapeHidden('ngcomany'), 'brmobile': scrapeValue("Bank Registered Mobile No"), 'bremail': scrapeValue("Bank Registered Email ID"),
-                'reject_remark': "", 'onlinesub': "0", 'taxpayertype': 0, 'loc_type': null, 'onrechargeatom': 0, 'bankcheck': '1', 'subonrechargerazorpay': 0
-            };
-            return { match: foundMatch, payloadData: data };
+        const cookies = await authenticate('admin', 'Pass@123');
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        const listUrl = `${baseURL}/billcntl/billpartners`;
+        const listResponse = await axios.get(listUrl, { headers: { 'Cookie': cookieString } });
+        const $ = cheerio.load(listResponse.data);
+        let foundMatch = null;
+        let multipleMatches = [];
+        const normalizedSearch = normalize(searchTerm);
+        $('table#dynamic-table tbody tr').each(function () {
+            const row = $(this);
+            const partnerId = normalize(row.find('td').eq(0).text());
+            const companyName = normalize(row.find('td').eq(1).find('a').text());
+            if (partnerId === normalizedSearch || companyName === normalizedSearch) {
+                multipleMatches.push({
+                    name: row.find('td').eq(1).find('a').text().trim(),
+                    id: row.find('td').eq(0).text().trim(),
+                    link: row.find('td').eq(1).find('a').attr('href')
+                });
+            }
         });
 
-        if (payloadData.error) {
-            await chat.sendMessage(payloadData.error);
+        if (multipleMatches.length === 0) {
+            await chat.sendMessage(`No ANP found matching "${searchTerm}".`);
             return;
         }
+        if (multipleMatches.length > 1) {
+            await chat.sendMessage(`Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
+            return;
+        }
+        foundMatch = multipleMatches[0];
+
+        const detailUrl = baseURL + foundMatch.link;
+        const detailResponse = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
+        const $$ = cheerio.load(detailResponse.data);
+        const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
+        const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
+        const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
+        let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
+        let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
+
+        const payloadData = {
+            'railwire_test_name': cookies.railwireCookie.value,
+            'partnerid': scrapeHidden('partnerid'), 'cname': scrapeValue("Company Name"), 'cregno': scrapeValue("Company Registration Number"),
+            'caddress': scrapeHtml('caddress'), 'cmanager': scrapeValue("Contact Person"), 'agreementdate': scrapeValue("Railwire Agreement Date"),
+            'agreementno': scrapeValue("Railwire Agreement No"), 'pancard': scrapeHidden('pancard'), 'bank_acholder': scrapeValue("Bank Account Holder Name"),
+            'bank_actype': scrapeValue("Bank Account Type"), 'bank_name': scrapeHtml('bank_name'), 'bank_branch': scrapeHtml('bank_branch'),
+            'bank_acno': scrapeValue("Bank Account No"), 'bank_ifsc': scrapeHidden('bank_ifsc'), 'gstin': gstin, 'sacno': scrapeValue("SAC No"),
+            'ptype': scrapeHtml('ptype'), 'gst_status': scrapeHidden("gststatus1"), 'legalname': scrapeHidden("legalnameval"),
+            'tradename': scrapeHidden("tradenameval"), 'ptnrattid': scrapeHtml('ptnrattid'), 'ptnrlang': scrapeHtml('ptnrlang'),
+            'territory_name': scrapeHidden('territory_name'), 'ring': scrapeValue("Ring"), 'brasip': scrapeValue("BRAS IP"),
+            'switchip': scrapeValue("Switch IP"), 'dropping': scrapeValue("Dropping"), 'interface': scrapeValue("Interface"),
+            'port_number': scrapeValue("Port Number"), 'pop_name': scrapeValue("Pop Name"), 'pop_pincode': scrapeValue("Pop Pin Code"),
+            'ngcomany': scrapeHidden('ngcomany'), 'brmobile': scrapeValue("Bank Registered Mobile No"), 'bremail': scrapeValue("Bank Registered Email ID"),
+            'reject_remark': "", 'onlinesub': "0", 'taxpayertype': 0, 'loc_type': null, 'onrechargeatom': 0, 'bankcheck': '1', 'subonrechargerazorpay': 0
+        };
+        const match = foundMatch;
 
         await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
         const phoneMessage = await waitForReply(message);
@@ -1321,16 +1251,15 @@ const handleAnpUpdate = async (message) => {
         const finalConfirmation = await waitForReply(message);
 
         if (finalConfirmation.body.trim().toLowerCase() === 'yes') {
-            const updateResponse = await withApiAuth(async (cookies) => {
-                const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
-                const response = await axios.post(updateUrl, new URLSearchParams(finalPayload), {
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                    }
-                });
-                return response.data;
+            const freshCookiesForUpdate = await authenticate('admin', 'Pass@123'); // Re-auth before final action
+            const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
+            const response = await axios.post(updateUrl, new URLSearchParams(finalPayload), {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': `${freshCookiesForUpdate.railwireCookie.name}=${freshCookiesForUpdate.railwireCookie.value}; ${freshCookiesForUpdate.ciSessionCookie.name}=${freshCookiesForUpdate.ciSessionCookie.value}`
+                }
             });
+            const updateResponse = response.data;
 
             if (updateResponse && (updateResponse.STATUS === "OK" || updateResponse.STATUS === "BANK VERIFIED")) {
                 await chat.sendMessage(`ANP details updated successfully for *${match.name}*!`);
@@ -1578,34 +1507,36 @@ const handleTicketActivation = async (message) => {
     const chat = await message.getChat();
     await chat.sendMessage("*++* Working *++*");
     try {
-        const { closedCount, skippedCount, closedTickets } = await withApiAuth(async (cookies) => {
-            const client = axios.create({
-                baseURL: 'https://jh.railwire.co.in',
-                headers: {
-                    'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                withCredentials: true,
+        const cookies = await authenticate('admin', 'Pass@123');
+        const client = axios.create({
+            baseURL: 'https://jh.railwire.co.in',
+            headers: {
+                'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            withCredentials: true,
+        });
+        const pageOffsets = ['', '30', '60'];
+        const tickets = [];
+        for (const offset of pageOffsets) {
+            const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
+            const response = await client.get(url);
+            const $ = cheerio.load(response.data);
+            $('table#results tbody tr').each((i, row) => {
+                const cells = $(row).find('td');
+                const respondLink = $(cells[cells.length - 1]).find('a').attr('href');
+                const statusText = $(cells[7]).text().trim().toLowerCase();
+                const subjectText = $(cells[4]).text().trim();
+                const match = respondLink?.match(/\/billticketview\/(\d+)\//);
+                if (match) {
+                    tickets.push({ ticketId: match[1], viewUrl: respondLink, status: statusText, subject: subjectText.toLowerCase() });
+                }
             });
-            const pageOffsets = ['', '30', '60'];
-            const tickets = [];
-            for (const offset of pageOffsets) {
-                const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
-                const response = await client.get(url);
-                const $ = cheerio.load(response.data);
-                $('table#results tbody tr').each((i, row) => {
-                    const cells = $(row).find('td');
-                    const respondLink = $(cells[cells.length - 1]).find('a').attr('href');
-                    const statusText = $(cells[7]).text().trim().toLowerCase();
-                    const subjectText = $(cells[4]).text().trim();
-                    const match = respondLink?.match(/\/billticketview\/(\d+)\//);
-                    if (match) {
-                        tickets.push({ ticketId: match[1], viewUrl: respondLink, status: statusText, subject: subjectText.toLowerCase() });
-                    }
-                });
-            }
-            if (tickets.length === 0) return { closedCount: 0, skippedCount: 0, closedTickets: [] };
-
+        }
+        
+        let closedCount = 0, skippedCount = 0;
+        const closedTickets = [];
+        if (tickets.length > 0) {
             let closed = 0, skipped = 0;
             const processed = [];
             const autoCloseSubjects = ['no connectivity', 'wireless network issue'];
@@ -1635,8 +1566,10 @@ const handleTicketActivation = async (message) => {
                     } else { skipped++; }
                 } else { skipped++; }
             }
-            return { closedCount: closed, skippedCount: skipped, closedTickets: processed };
-        });
+            closedCount = closed;
+            skippedCount = skipped;
+            closedTickets.push(...processed);
+        }
 
         let ticketSummary = `🎯 *Ticket Processing Results*\n\n*📊 Summary:*\n\n✅ ${closedCount} Closed (Session Active)\n⏭️ ${skippedCount} Skipped (Various Reasons)\n\n`;
         if (closedTickets.length > 0) {
@@ -1656,31 +1589,30 @@ const handleTicketActivation = async (message) => {
 // Helper function to check session status
 async function checkSessionStatus(subscriberCode) {
     try {
-        return await withApiAuth(async (cookies) => {
-            const client = axios.create({
-                baseURL: 'https://jh.railwire.co.in',
-                headers: {
-                    'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                withCredentials: true,
-            });
-            const payload = new URLSearchParams({ railwire_test_name: cookies.railwireCookie.value, 'user-search': subscriberCode });
-            const searchRes = await client.post('/billcntl/searchsub', payload.toString());
-            const $ = cheerio.load(searchRes.data);
-            const detailLink = $('a[href^="/billcntl/subscriptiondetail/"]').attr('href');
-            if (!detailLink) throw new Error('Subscriber detail link not found');
-
-            const detailPageRes = await client.get(detailLink);
-            const $$ = cheerio.load(detailPageRes.data);
-            const dataUsageLink = $$('a[href^="/billcntl/currentmonthdatause/"]').attr('href');
-            if (!dataUsageLink) throw new Error('Data usage link not found');
-
-            const usagePageRes = await client.get(dataUsageLink);
-            const $$$ = cheerio.load(usagePageRes.data);
-            const sessionActive = $$$('#cusdiscon_btn').length > 0;
-            return sessionActive ? 'Active' : 'Not Active';
+        const cookies = await authenticate('admin', 'Pass@123');
+        const client = axios.create({
+            baseURL: 'https://jh.railwire.co.in',
+            headers: {
+                'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            withCredentials: true,
         });
+        const payload = new URLSearchParams({ railwire_test_name: cookies.railwireCookie.value, 'user-search': subscriberCode });
+        const searchRes = await client.post('/billcntl/searchsub', payload.toString());
+        const $ = cheerio.load(searchRes.data);
+        const detailLink = $('a[href^="/billcntl/subscriptiondetail/"]').attr('href');
+        if (!detailLink) throw new Error('Subscriber detail link not found');
+
+        const detailPageRes = await client.get(detailLink);
+        const $$ = cheerio.load(detailPageRes.data);
+        const dataUsageLink = $$('a[href^="/billcntl/currentmonthdatause/"]').attr('href');
+        if (!dataUsageLink) throw new Error('Data usage link not found');
+
+        const usagePageRes = await client.get(dataUsageLink);
+        const $$$ = cheerio.load(usagePageRes.data);
+        const sessionActive = $$$('#cusdiscon_btn').length > 0;
+        return sessionActive ? 'Active' : 'Not Active';
     } catch (err) {
         console.warn(`Session status check failed for ${subscriberCode} after retries:`, err.message);
         return 'Not Active';
@@ -1689,25 +1621,24 @@ async function checkSessionStatus(subscriberCode) {
 
 async function ChangePlan(formData) {
     try {
-        const responseData = await withApiAuth(async (cookies) => {
-            const url = 'https://jh.railwire.co.in/finapis/msp_plan_applynow';
-            const payload = {
-                verifyHidden: formData.verifyHidden,
-                subid: formData.subid,
-                pkgid: formData.pkgid,
-                status: formData.status,
-                uname: formData.username,
-                oldpkgid: formData.oldpkgid,
-                railwire_test_name: cookies.railwireCookie.value
-            };
-            const response = await axios.post(url, new URLSearchParams(payload).toString(), {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                }
-            });
-            return response.data;
+        const cookies = await authenticate('admin', 'Pass@123');
+        const url = 'https://jh.railwire.co.in/finapis/msp_plan_applynow';
+        const payload = {
+            verifyHidden: formData.verifyHidden,
+            subid: formData.subid,
+            pkgid: formData.pkgid,
+            status: formData.status,
+            uname: formData.username,
+            oldpkgid: formData.oldpkgid,
+            railwire_test_name: cookies.railwireCookie.value
+        };
+        const response = await axios.post(url, new URLSearchParams(payload).toString(), {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
         });
+        const responseData = response.data;
         console.log(`Plan changed : "${responseData.STATUS}"`);
         return responseData.STATUS === 'OK';
     } catch (error) {
@@ -1774,24 +1705,24 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
 
 const processTasks = async (originalMessage) => {
     try {
-        const { submittedTasks, verifiedTasks } = await withApiAuth(async (cookies) => {
-            const { data } = await axios.get(mainURL, {
-                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-                timeout: 15000
-            });
-            const $ = cheerio.load(data);
-            const submitted = [];
-            const verified = [];
-            $('table tbody tr').each((_, el) => {
-                const cells = $(el).find('td');
-                const status = $(cells[1]).text().trim().toLowerCase();
-                const link = $(cells[2]).find('a').attr('href');
-                const oltabid = link?.split('/')[3];
-                if (status === 'submitted' && link) submitted.push({ link, oltabid });
-                else if (status === 'verified' && link) verified.push({ link });
-            });
-            return { submittedTasks: submitted, verifiedTasks: verified };
+        const cookies = await authenticate('admin', 'Pass@123');
+        const { data } = await axios.get(mainURL, {
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 15000
         });
+        const $ = cheerio.load(data);
+        const submitted = [];
+        const verified = [];
+        $('table tbody tr').each((_, el) => {
+            const cells = $(el).find('td');
+            const status = $(cells[1]).text().trim().toLowerCase();
+            const link = $(cells[2]).find('a').attr('href');
+            const oltabid = link?.split('/')[3];
+            if (status === 'submitted' && link) submitted.push({ link, oltabid });
+            else if (status === 'verified' && link) verified.push({ link });
+        });
+        const submittedTasks = submitted;
+        const verifiedTasks = verified;
 
         const results = { submitted: { total: submittedTasks.length, processed: 0 }, verified: { total: verifiedTasks.length, processed: 0 } };
 
@@ -1900,97 +1831,94 @@ const getUsername = async (firstName, baseUsername, cookies) => {
 
 const createSubscription = async (link, derivedUsername, originalMessage) => {
     try {
-        return await withApiAuth(async (cookies) => {
-            const hiddenInputs = await getHiddenInputs(link, cookies);
-            if (!hiddenInputs.oltabid || !hiddenInputs.pggroupid || !hiddenInputs.pkgid) {
-                throw new Error('Required hidden inputs not found');
-            }
+        const cookies = await authenticate('admin', 'Pass@123');
+        const hiddenInputs = await getHiddenInputs(link, cookies);
+        if (!hiddenInputs.oltabid || !hiddenInputs.pggroupid || !hiddenInputs.pkgid) {
+            throw new Error('Required hidden inputs not found');
+        }
 
-            const { data: formData } = await axios.get(`${baseURL}${link}`, {
-                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-                timeout: 9000
-            });
-            const $ = cheerio.load(formData);
-            const existingUsername = ($('input#uname').attr('value') || $('input#dusername_org').attr('value') || '').trim();
-
-            let optionsMessage = `Choose username option:\n`;
-            if (existingUsername) optionsMessage += `1. Default Username: ${existingUsername}\n`;
-            optionsMessage += `2. Bot Username: ${derivedUsername}\n`;
-            optionsMessage += `3. Input Username manually\n`;
-            await originalMessage.reply(optionsMessage);
-
-            const userChoice = await waitForReply(originalMessage);
-            let finalUsername;
-            switch (userChoice.body.trim()) {
-                case '1':
-                    if (existingUsername) finalUsername = existingUsername;
-                    break;
-                case '2':
-                    finalUsername = derivedUsername;
-                    break;
-                case '3':
-                    await originalMessage.reply("Input Manual Username:");
-                    finalUsername = (await waitForReply(originalMessage)).body.trim();
-                    break;
-                default:
-                    await originalMessage.reply("Invalid option."); return false;
-            }
-            if (!finalUsername) return false;
-            const verifiedUsername = await getUsername(hiddenInputs.firstname, finalUsername, cookies);
-            if (!verifiedUsername) {
-                await originalMessage.reply(`Username "${finalUsername}" is not available.`);
-                return false;
-            }
-
-            const payload = new URLSearchParams({
-                oltabid: hiddenInputs.oltabid, uname: verifiedUsername, pggroupid: hiddenInputs.pggroupid,
-                pkgid: hiddenInputs.pkgid, anp: hiddenInputs.anp, vlanid: hiddenInputs.vlanid,
-                caf_type: hiddenInputs.caf_type, railwire_test_name: cookies.railwireCookie.value,
-                mobileno: hiddenInputs.mobileno
-            }).toString();
-
-            const { status } = await axios.post(`${baseURL}/kycapis/create_subscription`, payload, {
-                headers: {
-                    Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                timeout: 9000
-            });
-
-            if (status === 200) {
-                const userData = await fetchUserDataFromPortal(verifiedUsername);
-                if (userData) await resetPassword(userData);
-            }
-            return status === 200;
+        const { data: formData } = await axios.get(`${baseURL}${link}`, {
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 9000
         });
+        const $ = cheerio.load(formData);
+        const existingUsername = ($('input#uname').attr('value') || $('input#dusername_org').attr('value') || '').trim();
+
+        let optionsMessage = `Choose username option:\n`;
+        if (existingUsername) optionsMessage += `1. Default Username: ${existingUsername}\n`;
+        optionsMessage += `2. Bot Username: ${derivedUsername}\n`;
+        optionsMessage += `3. Input Username manually\n`;
+        await originalMessage.reply(optionsMessage);
+
+        const userChoice = await waitForReply(originalMessage);
+        let finalUsername;
+        switch (userChoice.body.trim()) {
+            case '1':
+                if (existingUsername) finalUsername = existingUsername;
+                break;
+            case '2':
+                finalUsername = derivedUsername;
+                break;
+            case '3':
+                await originalMessage.reply("Input Manual Username:");
+                finalUsername = (await waitForReply(originalMessage)).body.trim();
+                break;
+            default:
+                await originalMessage.reply("Invalid option."); return false;
+        }
+        if (!finalUsername) return false;
+        const verifiedUsername = await getUsername(hiddenInputs.firstname, finalUsername, cookies);
+        if (!verifiedUsername) {
+            await originalMessage.reply(`Username "${finalUsername}" is not available.`);
+            return false;
+        }
+
+        const payload = new URLSearchParams({
+            oltabid: hiddenInputs.oltabid, uname: verifiedUsername, pggroupid: hiddenInputs.pggroupid,
+            pkgid: hiddenInputs.pkgid, anp: hiddenInputs.anp, vlanid: hiddenInputs.vlanid,
+            caf_type: hiddenInputs.caf_type, railwire_test_name: cookies.railwireCookie.value,
+            mobileno: hiddenInputs.mobileno
+        }).toString();
+
+        const { status } = await axios.post(`${baseURL}/kycapis/create_subscription`, payload, {
+            headers: {
+                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            timeout: 9000
+        });
+
+        if (status === 200) {
+            const userData = await fetchUserDataFromPortal(verifiedUsername);
+            if (userData) await resetPassword(userData);
+        }
+        return status === 200;
     } catch (err) {
         console.error(`Error creating subscription after retries: ${err.message}`);
         return false;
     }
 };
 
-
 const handleVerifiedForm = async (link, originalMessage) => {
     try {
-        return await withApiAuth(async (cookies) => {
-            const { data } = await axios.get(`${baseURL}${link}`, {
-                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-                timeout: 9000
-            });
-            const $ = cheerio.load(data);
-            const firstName = (await getHiddenInputs(link, cookies)).firstname?.split(' ')[0]?.toLowerCase();
-            if (!firstName) throw new Error('First name not found.');
-
-            const associatedPartner = $(`.profile-info-name:contains('Associated Partner')`).next().text().trim().toLowerCase();
-            const jhCode = jhCodeMap?.get(associatedPartner);
-            if (!jhCode) throw new Error('JH Code not found for partner.');
-
-            const baseUsername = `${jhCode}.${firstName}`;
-            const finalUsername = await getUsername(firstName, baseUsername, cookies);
-            if (!finalUsername) throw new Error('Failed to derive username.');
-
-            return await createSubscription(link, finalUsername, originalMessage);
+        const cookies = await authenticate('admin', 'Pass@123');
+        const { data } = await axios.get(`${baseURL}${link}`, {
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 9000
         });
+        const $ = cheerio.load(data);
+        const firstName = (await getHiddenInputs(link, cookies)).firstname?.split(' ')[0]?.toLowerCase();
+        if (!firstName) throw new Error('First name not found.');
+
+        const associatedPartner = $(`.profile-info-name:contains('Associated Partner')`).next().text().trim().toLowerCase();
+        const jhCode = jhCodeMap?.get(associatedPartner);
+        if (!jhCode) throw new Error('JH Code not found for partner.');
+
+        const baseUsername = `${jhCode}.${firstName}`;
+        const finalUsername = await getUsername(firstName, baseUsername, cookies);
+        if (!finalUsername) throw new Error('Failed to derive username.');
+
+        return await createSubscription(link, finalUsername, originalMessage);
     } catch (err) {
         console.error(`Error processing verified form after retries: ${err.message}`);
         return false;
@@ -2048,19 +1976,48 @@ const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
 
 const handleSubmittedForm = async (link, oltabid, username, originalMessage) => {
     try {
-        return await withApiAuth(async (cookies) => {
-            const { data } = await axios.get(`${baseURL}${link}`, {
-                headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-                timeout: 8000
+        const cookies = await authenticate('admin', 'Pass@123');
+        const { data } = await axios.get(`${baseURL}${link}`, {
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 8000
+        });
+        const $ = cheerio.load(data);
+
+        const addressProofElement = $(`.profile-info-name:contains('Address Proof Copy')`).next().find('span');
+        const addressProof = addressProofElement.length > 0 && addressProofElement.text().trim().toLowerCase() === 'file not exists' ? 'file not exists' : 'View';
+        const mobileNo = $(`.profile-info-name:contains('Mobile No.')`).next().find('span').text().trim();
+
+        if (addressProof === 'file not exists') {
+            console.log('Marking as verified because file not exists.');
+            const payload = new URLSearchParams({ oltabid, mobileno_dual: mobileNo, railwire_test_name: cookies.railwireCookie.value }).toString();
+            await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
+                headers: {
+                    Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                timeout: 5000
             });
-            const $ = cheerio.load(data);
+            return true;
+        } else {
+            let extractedData = `Address Proof for No.: ${mobileNo}\n\nDetails:\n`;
+            $('.profile-info-row').each((index, element) => {
+                const infoName = $(element).find('.profile-info-name').text().trim();
+                const infoValueElement = $(element).find('.profile-info-value span');
+                let infoValue = infoValueElement.text().trim();
+                const linkElement = infoValueElement.find('a');
+                if (linkElement.length > 0) {
+                    infoValue = `View >> ${baseURL}${linkElement.attr('href')}`;
+                }
+                if (!/notice|reason for kyc rejection|address type|id no|door no|street|applied package/i.test(infoName)) {
+                    extractedData += `${infoName}: ${infoValue}\n`;
+                }
+            });
 
-            const addressProofElement = $(`.profile-info-name:contains('Address Proof Copy')`).next().find('span');
-            const addressProof = addressProofElement.length > 0 && addressProofElement.text().trim().toLowerCase() === 'file not exists' ? 'file not exists' : 'View';
-            const mobileNo = $(`.profile-info-name:contains('Mobile No.')`).next().find('span').text().trim();
+            await originalMessage.reply(extractedData);
+            await originalMessage.reply(`Do you want to verify? (y/n)`);
+            const userInput = (await waitForReply(originalMessage)).body.toLowerCase();
 
-            if (addressProof === 'file not exists') {
-                console.log('Marking as verified because file not exists.');
+            if (userInput.startsWith('y')) {
                 const payload = new URLSearchParams({ oltabid, mobileno_dual: mobileNo, railwire_test_name: cookies.railwireCookie.value }).toString();
                 await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
                     headers: {
@@ -2071,40 +2028,10 @@ const handleSubmittedForm = async (link, oltabid, username, originalMessage) => 
                 });
                 return true;
             } else {
-                let extractedData = `Address Proof for No.: ${mobileNo}\n\nDetails:\n`;
-                $('.profile-info-row').each((index, element) => {
-                    const infoName = $(element).find('.profile-info-name').text().trim();
-                    const infoValueElement = $(element).find('.profile-info-value span');
-                    let infoValue = infoValueElement.text().trim();
-                    const linkElement = infoValueElement.find('a');
-                    if (linkElement.length > 0) {
-                        infoValue = `View >> ${baseURL}${linkElement.attr('href')}`;
-                    }
-                    if (!/notice|reason for kyc rejection|address type|id no|door no|street|applied package/i.test(infoName)) {
-                        extractedData += `${infoName}: ${infoValue}\n`;
-                    }
-                });
-
-                await originalMessage.reply(extractedData);
-                await originalMessage.reply(`Do you want to verify? (y/n)`);
-                const userInput = (await waitForReply(originalMessage)).body.toLowerCase();
-
-                if (userInput.startsWith('y')) {
-                    const payload = new URLSearchParams({ oltabid, mobileno_dual: mobileNo, railwire_test_name: cookies.railwireCookie.value }).toString();
-                    await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
-                        headers: {
-                            Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-                            'Content-Type': 'application/x-www-form-urlencoded'
-                        },
-                        timeout: 5000
-                    });
-                    return true;
-                } else {
-                    console.log('User chose not to verify. Skipping verification.');
-                    return false;
-                }
+                console.log('User chose not to verify. Skipping verification.');
+                return false;
             }
-        });
+        }
     } catch (err) {
         console.error(`Error processing submitted form for ${username} after retries: ${err.message}`);
         return false;
@@ -2290,22 +2217,21 @@ client.on('ready', () => {
 
             let csvMedia = null;
             try {
-                const csvBuffer = await withApiAuth(async (cookies) => {
-                    const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-                    const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
-                        headers: {
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'Cookie': cookieString,
-                            'Sec-Fetch-Dest': 'document',
-                        },
-                        responseType: 'arraybuffer'
-                    });
-                    if (response.status !== 200) {
-                        throw new Error(`Server responded with status ${response.status}`);
-                    }
-                    return response.data;
+                const cookies = await authenticate('admin', 'Pass@123');
+                const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+                const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
+                    headers: {
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Cookie': cookieString,
+                        'Sec-Fetch-Dest': 'document',
+                    },
+                    responseType: 'arraybuffer'
                 });
+                if (response.status !== 200) {
+                    throw new Error(`Server responded with status ${response.status}`);
+                }
+                const csvBuffer = response.data;
 
                 const today = new Date();
                 const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
@@ -2355,17 +2281,12 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
- //   cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
- //       timezone: "Asia/Kolkata"
- //   });
+    //   cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
+    //       timezone: "Asia/Kolkata"
+    //   });
 
     // 1. Check for new tickets every 5 minutes
     cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
-        timezone: "Asia/Kolkata"
-    });
-
-    // 2. Clear the processed ticket cache daily at midnight
-    cron.schedule('0 0 * * *', clearProcessedTickets, {
         timezone: "Asia/Kolkata"
     });
 
@@ -2393,46 +2314,7 @@ const processInBatches = async (items, asyncFn, batchSize = 15) => {
     return results;
 };
 
-const getNmsSession = async (billingCookies) => {
-    // If an NMS authentication is in progress, wait for it to complete.
-    if (nmsAuthenticationPromise) {
-        console.log('[NMS Auth] NMS auth. in progress..');
-        return await nmsAuthenticationPromise;
-    }
 
-    if (cachedNmsCookie) {
-        console.log('[NMS Auth] Using cached NMS session.');
-        // Optional: Add a validation step here if possible, similar to the main getCookies function.
-        return cachedNmsCookie;
-    }
-    nmsAuthenticationPromise = (async () => {
-        try {
-            console.log('[NMS Auth] No valid NMS session found. Re-Auth..');
-            const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
-            const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
-
-            const $ = cheerio.load(data);
-            const nmsUsername = $('#srvs_redi input[name="username"]').val();
-            const nmsPassword = $('#srvs_redi input[name="password"]').val();
-            if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
-
-            const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
-
-            if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
-            const nmsCookie = headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
-
-            cachedNmsCookie = nmsCookie;
-            return nmsCookie;
-        } catch (error) {
-            console.error(`[NMS Auth] NMS authentication critical error: ${error.message}`);
-            return null;
-        } finally {
-            nmsAuthenticationPromise = null;
-        }
-    })();
-    
-    return await nmsAuthenticationPromise;
-};
 
 const getAllPartners = async (billingCookies) => {
     const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
@@ -2491,23 +2373,38 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
     console.log(`\n==================== ANP CHECK START ====================\nTriggered by: ${triggeredBy} | Time: ${timeStamp}`);
 
     try {
-        const partnerResults = await withApiAuth(async (billingCookies) => {
-            console.log(`Getting NMS session...`);
-            const nmsCookie = await getNmsSession(billingCookies);
-            console.log(`Fetching all partners...`);
-            const allPartners = await getAllPartners(billingCookies);
-            console.log(`Found ${allPartners.length} total partners`);
-            const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
-            console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
+        // Step 1: Inline main billing authentication
+        const billingCookies = await authenticate('admin', 'Pass@123');
+        console.log(`Getting NMS session...`);
 
-            const checkPartnerStatus = async (partner) => {
-                const liveCount = await getLiveOnlineCount(partner.id, nmsCookie);
-                const status = liveCount === 'Error' ? 'ERROR' : liveCount === 0 ? 'DOWN' : 'OK';
-                console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status}`);
-                return { ...partner, live_subs: liveCount };
-            };
-            return await processInBatches(partnersToCheck, checkPartnerStatus);
-        });
+        // Step 2: Inline NMS session authentication
+        const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
+        const { data: nmsLoginPageData } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
+
+        const $ = cheerio.load(nmsLoginPageData);
+        const nmsUsername = $('#srvs_redi input[name="username"]').val();
+        const nmsPassword = $('#srvs_redi input[name="password"]').val();
+        if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
+
+        const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
+
+        if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
+        const nmsCookie = headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+        
+        // Step 3: Proceed with the rest of the function's original logic
+        console.log(`Fetching all partners...`);
+        const allPartners = await getAllPartners(billingCookies);
+        console.log(`Found ${allPartners.length} total partners`);
+        const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
+        console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
+
+        const checkPartnerStatus = async (partner) => {
+            const liveCount = await getLiveOnlineCount(partner.id, nmsCookie);
+            const status = liveCount === 'Error' ? 'ERROR' : liveCount === 0 ? 'DOWN' : 'OK';
+            console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status}`);
+            return { ...partner, live_subs: liveCount };
+        };
+        const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
 
         const extraDetails = loadPartnerLiveDetails();
         const currentProblemPartners = new Map();
