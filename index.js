@@ -2018,6 +2018,7 @@ const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
                 'ANP ID': row['ANP ID'],
                 'ANP Name': row['ANP Name'],
                 'District': row['District'],
+                'Cluster': row['Cluster'],
                 'Stack VLAN': row['Stack VLAN'],
                 'Customer VLAN': row['Customer VLAN'],
                 'JH Code': row['JH Code'],
