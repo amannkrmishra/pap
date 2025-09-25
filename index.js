@@ -488,10 +488,12 @@ const handleBulkSubscriberUpdate = async (message) => {
 
 const getCookies = async () => {
     if (cachedSessionCookies) {
+        console.log('[Auth] Using cached session.');
         return cachedSessionCookies;
     }
 
     try {
+        console.log('[Auth] No valid session found. Performing full authentication...');
         const {
             railwireCookie,
             ciSessionCookie
@@ -2187,8 +2189,12 @@ const processInBatches = async (items, asyncFn, batchSize = 15) => {
 };
 
 const getNmsSession = async (billingCookies) => {
-    if (cachedNmsCookie) return cachedNmsCookie;
+    if (cachedNmsCookie) {
+        console.log('[NMS Auth] Using cached NMS session.');
+        return cachedNmsCookie;
+    }
 
+    console.log('[NMS Auth] No valid NMS session found. Performing NMS authentication...');
     const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
     const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
 
