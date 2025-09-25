@@ -142,6 +142,31 @@ const maskUsername = (userCode) => {
     return userCode;
 };
 
+const isAuthError = (error) => {
+    if (!error.response) return false;
+    const status = error.response.status;
+    const data = error.response.data || '';
+    return status === 401 || status === 403 || (typeof data === 'string' && data.includes('id="captcha_code"'));
+};
+
+const withApiAuth = async (apiCallLogic, ...args) => {
+    try {
+        const cookies = await getCookies();
+        if (!cookies) throw new Error("Initial authentication failed.");
+        return await apiCallLogic(cookies, ...args);
+    } catch (error) {
+        if (!isAuthError(error)) {
+            throw error;
+        }
+        console.warn(`Authentication error detected. Clearing cache and retrying...`);
+        cachedSessionCookies = null;
+        if (cookieCleanupTimeout) clearTimeout(cookieCleanupTimeout);
+        const newCookies = await getCookies();
+        if (!newCookies) throw new Error("Re-authentication failed.");
+        return await apiCallLogic(newCookies, ...args);
+    }
+};
+
 const createHeaderMap = (header) => header.reduce((acc, col, index) => {
     acc[col] = index;
     return acc;
@@ -282,34 +307,25 @@ const loadPartnerMappings = (filename = 'TicketMappingANP.xlsx') => {
 
 const getSubscriberCount = async () => {
     try {
-        const cookies = await getCookies();
-        if (!cookies) {
-            throw new Error("Authentication failed, cannot get cookies.");
-        }
+        return await withApiAuth(async (cookies) => {
+            const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+            const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
 
-        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-        const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
+            const response = await axios.get(dashboardUrl, {
+                headers: { 'Cookie': cookieString },
+                timeout: 15000
+            });
 
-        const response = await axios.get(dashboardUrl, {
-            headers: {
-                'Cookie': cookieString
-            }
+            const $ = cheerio.load(response.data);
+            const subscriberCount = $('.infobox-content:contains("active subscribers")')
+                .siblings('.infobox-data-number')
+                .text()
+                .trim();
+
+            return subscriberCount || 'Count not found.';
         });
-
-        const $ = cheerio.load(response.data);
-        const subscriberCount = $('.infobox-content:contains("active subscribers")')
-            .siblings('.infobox-data-number')
-            .text()
-            .trim();
-
-        if (subscriberCount) {
-            return subscriberCount;
-        } else {
-            return 'Count not found.';
-        }
-
     } catch (error) {
-        console.error('Error fetching subscriber count:', error.message);
+        console.error('Error fetching subscriber count after retries:', error.message);
         return 'Could not retrieve count.';
     }
 };
@@ -350,7 +366,6 @@ const loadExcelData = () => {
 
 const handleSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
-
     try {
         await chat.sendMessage("Enter Username or ID:");
         const idMessage = await waitForReply(message);
@@ -362,13 +377,11 @@ const handleSubscriberUpdate = async (message) => {
         const userDataMap = await loadUserDataFromExcel();
         const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
 
-        // 3. Validate if user was found
         if (!userData || !userData.SubscriberId) {
             await chat.sendMessage(`Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
             return;
         }
 
-        // 4. Ask for the new Phone Number
         await chat.sendMessage(`Found: *${userData.Username}*\n\nInput New Phone Number:`);
         const phoneMessage = await waitForReply(message);
         const newPhoneNumber = phoneMessage.body.trim();
@@ -377,7 +390,6 @@ const handleSubscriberUpdate = async (message) => {
             return;
         }
 
-        // 5. Ask for the new Email Address
         await chat.sendMessage(`Input New Email Address:`);
         const emailMessage = await waitForReply(message);
         const newEmail = emailMessage.body.trim().toLowerCase();
@@ -386,119 +398,90 @@ const handleSubscriberUpdate = async (message) => {
             return;
         }
 
-        // 6. Perform the update via API call
-        const cookies = await getCookies();
-        if (!cookies) {
-            await chat.sendMessage("Authentication failed. Cannot proceed.");
-            return;
-        }
-
-        const payload = new URLSearchParams({
-            'cnumber': newPhoneNumber,
-            'cemail': newEmail,
-            'id': userData.SubscriberId,
-            'railwire_test_name': cookies.railwireCookie.value
-        });
-
-        const config = {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-            }
-        };
-
-        const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
-
-        // 7. Confirm the result to the user
-        if (response.data && response.data.STATUS === "OK") {
-            await chat.sendMessage(`Details have been updated successfully for *${userData.Username}*!`);
-        } else {
-            const serverStatus = response.data ? response.data.STATUS : "No response";
-            await chat.sendMessage(`Update failed. Server responded: ${serverStatus}`);
-        }
-
-    } catch (error) {
-        console.error("Error during subscriber update:", error.message);
-        await chat.sendMessage("An unexpected error occurred during the update process.");
-    }
-};
-
-const handleBulkSubscriberUpdate = async (message) => {
-    const chat = await message.getChat();
-    const userIdentifier = getUserIdentifier(message);
-    const session = userSessions.get(userIdentifier);
-
-    // 1. Check if there are any user codes in the session
-    if (!session || !session.userCodes || session.userCodes.length === 0) {
-        await chat.sendMessage("No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
-        return;
-    }
-
-    const {
-        userCodes
-    } = session;
-
-    const cookies = await getCookies();
-    if (!cookies) {
-        await chat.sendMessage("Authentication failed. Cannot proceed.");
-        userSessions.delete(userIdentifier); // Clean up session on auth failure
-        return;
-    }
-
-    // 2. Loop through each user code from the session
-    for (const userCode of userCodes) {
-        try {
-            // Fetch live user data to get both SubscriberId and Username
-            const userData = await fetchUserDataFromPortal(userCode);
-
-            if (!userData || !userData.SubscriberId || !userData.Username) {
-                await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
-                continue; // Move to the next user in the loop
-            }
-
-            // 3. Generate random details for this user
-            const newPhoneNumber = generateRandomMobile();
-            const newEmail = generateRandomEmail(userData.Username);
-
-            // 4. Perform the update (reusing logic from the single update function)
+        const responseData = await withApiAuth(async (cookies) => {
             const payload = new URLSearchParams({
                 'cnumber': newPhoneNumber,
                 'cemail': newEmail,
                 'id': userData.SubscriberId,
                 'railwire_test_name': cookies.railwireCookie.value
             });
-
             const config = {
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
                 }
             };
-
             const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+            return response.data;
+        });
 
-            // 5. Send feedback to the user
-            if (response.data && response.data.STATUS === "OK") {
-                let reply = `*Username:* ${userData.Username}\n`;
-                reply += `*New Mobile No.:* ${newPhoneNumber}\n`;
-                reply += `*New Email ID:* ${newEmail}\n\n`;
+        if (responseData && responseData.STATUS === "OK") {
+            await chat.sendMessage(`Details have been updated successfully for *${userData.Username}*!`);
+        } else {
+            const serverStatus = responseData ? responseData.STATUS : "No response";
+            await chat.sendMessage(`Update failed. Server responded: ${serverStatus}`);
+        }
+
+    } catch (error) {
+        console.error("Error during subscriber update after retries:", error.message);
+        await chat.sendMessage("An unexpected error occurred during the update process.");
+    }
+};
+const handleBulkSubscriberUpdate = async (message) => {
+    const chat = await message.getChat();
+    const userIdentifier = getUserIdentifier(message);
+    const session = userSessions.get(userIdentifier);
+
+    if (!session || !session.userCodes || session.userCodes.length === 0) {
+        await chat.sendMessage("No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
+        return;
+    }
+    const { userCodes } = session;
+
+    for (const userCode of userCodes) {
+        try {
+            const userData = await fetchUserDataFromPortal(userCode);
+            if (!userData || !userData.SubscriberId || !userData.Username) {
+                await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
+                continue;
+            }
+
+            const newPhoneNumber = generateRandomMobile();
+            const newEmail = generateRandomEmail(userData.Username);
+
+            const responseData = await withApiAuth(async (cookies) => {
+                const payload = new URLSearchParams({
+                    'cnumber': newPhoneNumber,
+                    'cemail': newEmail,
+                    'id': userData.SubscriberId,
+                    'railwire_test_name': cookies.railwireCookie.value
+                });
+                const config = {
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                    }
+                };
+                const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+                return response.data;
+            });
+
+            if (responseData && responseData.STATUS === "OK") {
+            let reply = `*Username:* ${userData.Username}\n`;
+                reply += `*Mobile No.:* ${newPhoneNumber}\n`;
+                reply += `*Email ID:* ${newEmail}\n\n`;
                 reply += `Details have been updated successfully.`;
                 await chat.sendMessage(reply);
             } else {
-                const serverStatus = response.data ? response.data.STATUS : "No response";
+                const serverStatus = responseData ? responseData.STATUS : "No response";
                 await chat.sendMessage(`Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
             }
-
         } catch (error) {
-            console.error(`Error during bulk update for ${userCode}:`, error.message);
+            console.error(`Error during bulk update for ${userCode} after retries:`, error.message);
             await chat.sendMessage(`An error occurred while processing *${userCode}*.`);
         }
-
-        // Add a small delay to avoid spamming the server
         await new Promise(resolve => setTimeout(resolve, 150));
     }
-
-    // 6. Clean up the session after the process is complete
     userSessions.delete(userIdentifier);
     await chat.sendMessage("Bulk update process finished.");
 };
@@ -687,156 +670,148 @@ async function retryOperation(operation, maxRetries = 3, delay = 1000) {
 
 
 async function fetchUserDataFromPortal(userCode) {
-    const cookies = await getCookies();
-
-    const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-    const payload = new URLSearchParams({
-        'railwire_test_name': cookies.railwireCookie.value,
-        'user-search': userCode
-    });
-
-    const searchResponse = await axios.post(
-        'https://jh.railwire.co.in/billcntl/searchsub ',
-        payload.toString(), {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': cookieString,
-            },
-            maxRedirects: 0,
-            validateStatus: status => status >= 200 && status < 400,
-        }
-    );
-
-    let finalUrl = searchResponse.headers.location;
-    if (!finalUrl.startsWith('http')) {
-        finalUrl = `https://jh.railwire.co.in${finalUrl}`;
-    }
-
-    const tableResponse = await axios.get(finalUrl, {
-        headers: {
-            Cookie: cookieString
-        }
-    });
-
-    const $ = cheerio.load(tableResponse.data);
-    const row = $('table.table-striped tbody tr').first();
-    if (!row.length) return null;
-
-    const cells = row.find('td');
-    if (cells.length < 6) return null;
-
-    const usernameAnchor = cells.eq(1).find('a');
-    const userDetailHref = usernameAnchor.attr('href');
-    const userDetailUrl = `https://jh.railwire.co.in${userDetailHref}`;
-
-    let name = '';
     try {
-        const detailResponse = await axios.get(userDetailUrl, {
-            headers: {
-                Cookie: cookieString
-            }
-        });
+        return await withApiAuth(async (cookies) => {
+            const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+            const payload = new URLSearchParams({
+                'railwire_test_name': cookies.railwireCookie.value,
+                'user-search': userCode
+            });
 
-        const $$ = cheerio.load(detailResponse.data);
-        $$('.table-bordered.table-condensed.table-striped tr').each((_, tr) => {
-            const key = $$(tr).find('td').first().text().trim();
-            if (key === 'Name') {
-                name = $$(tr).find('td').eq(1).text().trim();
+            const searchResponse = await axios.post(
+                'https://jh.railwire.co.in/billcntl/searchsub ',
+                payload.toString(), {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': cookieString,
+                },
+                maxRedirects: 0,
+                validateStatus: status => status >= 200 && status < 400,
             }
+            );
+
+            let finalUrl = searchResponse.headers.location;
+            if (!finalUrl || !finalUrl.startsWith('/')) return null;
+            finalUrl = `https://jh.railwire.co.in${finalUrl}`;
+
+            const tableResponse = await axios.get(finalUrl, { headers: { Cookie: cookieString } });
+            const $ = cheerio.load(tableResponse.data);
+            const row = $('table.table-striped tbody tr').first();
+            if (!row.length) return null;
+
+            const cells = row.find('td');
+            if (cells.length < 6) return null;
+
+            const usernameAnchor = cells.eq(1).find('a');
+            const userDetailHref = usernameAnchor.attr('href');
+            const userDetailUrl = `https://jh.railwire.co.in${userDetailHref}`;
+
+            let name = '';
+            try {
+                const detailResponse = await axios.get(userDetailUrl, { headers: { Cookie: cookieString } });
+                const $$ = cheerio.load(detailResponse.data);
+                $$('.table-bordered.table-condensed.table-striped tr').each((_, tr) => {
+                    const key = $$(tr).find('td').first().text().trim();
+                    if (key === 'Name') {
+                        name = $$(tr).find('td').eq(1).text().trim();
+                    }
+                });
+            } catch (err) {
+                console.error('Failed to fetch user detail page:', err.message);
+            }
+
+            const userData = {
+                username: usernameAnchor.text().trim(),
+                mobileNo: cells.eq(5).text().trim(),
+                id: cells.eq(0).text().trim(),
+                name: name
+            };
+
+            return userData ? {
+                Username: userData.username,
+                MobileNo: userData.mobileNo,
+                SubscriberId: userData.id,
+                Name: userData.name
+            } : null;
         });
-    } catch (err) {
-        console.error('Failed to fetch user detail page:', err.message);
+    } catch (error) {
+        console.error(`Error fetching portal data for ${userCode} after retries:`, error.message);
+        return null;
     }
-
-    const userData = {
-        username: usernameAnchor.text().trim(),
-        mobileNo: cells.eq(5).text().trim(),
-        id: cells.eq(0).text().trim(),
-        name: name
-    };
-
-    return userData ? {
-        Username: userData.username,
-        MobileNo: userData.mobileNo,
-        SubscriberId: userData.id,
-        Name: userData.name
-    } : null;
 }
 
-const resetSession = async (userData, cookies) => {
-    const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
-    const config = {
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-        }
-    };
+const resetSession = async (userData) => {
     try {
-        const response = await axios.post('https://jh.railwire.co.in/billcntl/endacctsession', payload, config);
+        const responseData = await withApiAuth(async (cookies) => {
+            const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
+            const config = {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                }
+            };
+            const response = await axios.post('https://jh.railwire.co.in/billcntl/endacctsession', payload, config);
+            return response.data;
+        });
 
-        console.log(`Session reset response:`, response.data);
-        if (response.data.message && response.data.message.includes('-1')) {
+        console.log(`Session reset response:`, responseData);
+        if (responseData.message && responseData.message.includes('-1')) {
             return 'NOT_ACTIVE';
-        }
-        else if (response.data.STATUS === 'OK') {
+        } else if (responseData.STATUS === 'OK') {
             return 'SUCCESS';
-        }
-        else {
+        } else {
             return 'ERROR';
         }
     } catch (error) {
-        console.error('Reset error:', error.message);
+        console.error('Reset error after retries:', error.message);
         return 'ERROR';
     }
 };
 
-const DeactivateID = async (userData, cookies) => {
-    const payload = `subid=${userData.SubscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
-    const config = {
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-        }
-    };
-
+const DeactivateID = async (userData) => {
     try {
-        const response = await axios.post('https://jh.railwire.co.in/billcntl/update_expiry', payload, config);
-
-        console.log(`Account activated / deactivated status: ${response.data.STATUS}`);
-        return response.data.STATUS === 'OK';
+        const responseData = await withApiAuth(async (cookies) => {
+            const payload = `subid=${userData.SubscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
+            const config = {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                }
+            };
+            const response = await axios.post('https://jh.railwire.co.in/billcntl/update_expiry', payload, config);
+            return response.data;
+        });
+        console.log(`Account activated / deactivated status: ${responseData.STATUS}`);
+        return responseData.STATUS === 'OK';
     } catch (error) {
-        console.error('Deactivate error:', error.message);
+        console.error('Deactivate error after retries:', error.message);
         return false;
     }
 };
 
-const resetPassword = async (userData, cookies) => {
-    const config = {
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-        }
-    };
-
-    const basePayload = `subid=${userData.SubscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
-
+const resetPassword = async (userData) => {
     try {
-        const [portalRes, pppoeRes] = await Promise.all([
-            axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Bill`, config),
-            axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Internet`, config)
-        ]);
-
-        console.log(`Portal: ${portalRes.data.STATUS} | PPPoE: ${pppoeRes.data.STATUS}`);
-        return {
-            portalReset: portalRes.data.STATUS === 'OK',
-            pppoeReset: pppoeRes.data.STATUS === 'OK'
-        };
+        return await withApiAuth(async (cookies) => {
+            const config = {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                }
+            };
+            const basePayload = `subid=${userData.SubscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
+            const [portalRes, pppoeRes] = await Promise.all([
+                axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Bill`, config),
+                axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Internet`, config)
+            ]);
+            console.log(`Portal: ${portalRes.data.STATUS} | PPPoE: ${pppoeRes.data.STATUS}`);
+            return {
+                portalReset: portalRes.data.STATUS === 'OK',
+                pppoeReset: pppoeRes.data.STATUS === 'OK'
+            };
+        });
     } catch (error) {
-        console.error('Password reset error:', error.message);
-        return {
-            portalReset: false,
-            pppoeReset: false
-        };
+        console.error('Password reset error after retries:', error.message);
+        return { portalReset: false, pppoeReset: false };
     }
 };
 
@@ -862,17 +837,14 @@ const handlePlanChange = async (message) => {
     const chat = await message.getChat();
     const messageBody = message.body;
 
-    // 1. Define patterns for usernames, subscriber IDs (for checking), and package IDs
     const usernamePattern = /jh[\.\w]+/gi;
     const subscriberIdPattern = /\b\d{5,}\b/g;
     const packageIdPattern = /\b\d{3,6}\b/g;
 
-    // 2. Extract all potential matches
     const usernames = messageBody.match(usernamePattern) || [];
     const subscriberIds = messageBody.match(subscriberIdPattern) || [];
     const potentialPackageIds = messageBody.match(packageIdPattern) || [];
 
-    // 3. Validate the input with clear rules
     if (usernames.length === 0 && subscriberIds.length > 0) {
         return await chat.sendMessage("Please provide a username not a subscriber ID.");
     }
@@ -887,91 +859,65 @@ const handlePlanChange = async (message) => {
     }
 
     const desiredPkgId = potentialPackageIds[0];
-    const cookies = await getCookies();
-    if (!cookies) {
-        return await chat.sendMessage("Authentication failed. Cannot proceed with plan change.");
-    }
-    const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
 
-    // 4. Loop through each VALIDATED username and process the plan change
     for (const username of usernames) {
         try {
-            const payload = new URLSearchParams({
-                'railwire_test_name': cookies.railwireCookie.value,
-                'user-search': username
-            });
-
-            const searchResponse = await axios.post(
-                'https://jh.railwire.co.in/billcntl/searchsub ',
-                payload.toString(), {
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Cookie': cookieString
-                    },
+            const formData = await withApiAuth(async (cookies) => {
+                const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+                const payload = new URLSearchParams({
+                    'railwire_test_name': cookies.railwireCookie.value,
+                    'user-search': username
+                });
+                const searchResponse = await axios.post(
+                    'https://jh.railwire.co.in/billcntl/searchsub ',
+                    payload.toString(), {
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookieString },
                     maxRedirects: 0,
                     validateStatus: status => status >= 200 && status < 400
                 }
-            );
+                );
+                const finalUrl = `https://jh.railwire.co.in${searchResponse.headers.location}`;
+                const tableResponse = await axios.get(finalUrl, { headers: { 'Cookie': cookieString } });
+                const $ = cheerio.load(tableResponse.data);
+                const searchResults = [];
+                $('table.table-striped tbody tr').each(function () {
+                    const row = $(this);
+                    const foundUsername = row.find('td:nth-child(2) a').text().trim();
+                    const link = row.find('td:nth-child(2) a').attr('href');
+                    if (foundUsername && link) {
+                        searchResults.push({ username: foundUsername, link });
+                    }
+                });
+                if (searchResults.length === 0) return { error: `No user found for "${username}".` };
+                const selectedUser = searchResults.find(user => user.username.toLowerCase() === username.toLowerCase());
+                if (!selectedUser) return { error: `No exact match for "${username}". Found ${searchResults.length} partial matches.` };
 
-            const finalUrl = `https://jh.railwire.co.in${searchResponse.headers.location}`;
-            const tableResponse = await axios.get(finalUrl, {
-                headers: {
-                    'Cookie': cookieString
-                }
+                const detailUrl = `https://jh.railwire.co.in${selectedUser.link}`;
+                const detailPage = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
+                const $$ = cheerio.load(detailPage.data);
+                return {
+                    subid: $$('#subid').val() || '',
+                    status: $$('#status').val() || '',
+                    oldpkgid: $$('#oldpackageid').val() || '',
+                    verifyHidden: $$('#verifyHidden').val() || '',
+                    pkgid: desiredPkgId,
+                    username: selectedUser.username
+                };
             });
-            const $ = cheerio.load(tableResponse.data);
 
-            const searchResults = [];
-            $('table.table-striped tbody tr').each(function() {
-                const row = $(this);
-                const foundUsername = row.find('td:nth-child(2) a').text().trim();
-                const link = row.find('td:nth-child(2) a').attr('href');
-                if (foundUsername && link) {
-                    searchResults.push({
-                        username: foundUsername,
-                        link
-                    });
-                }
-            });
-
-            if (searchResults.length === 0) {
-                await chat.sendMessage(`No user found for "${username}". Skipping.`);
+            if (formData.error) {
+                await chat.sendMessage(formData.error + " Skipping.");
                 continue;
             }
 
-            const selectedUser = searchResults.find(user => user.username.toLowerCase() === username.toLowerCase());
-
-            if (!selectedUser) {
-                await chat.sendMessage(`No exact match found for "${username}". Found ${searchResults.length} partial matches. Skipping.`);
-                continue;
-            }
-
-            const detailUrl = `https://jh.railwire.co.in${selectedUser.link}`;
-            const detailPage = await axios.get(detailUrl, {
-                headers: {
-                    'Cookie': cookieString
-                }
-            });
-
-            const $$ = cheerio.load(detailPage.data);
-            const formData = {
-                subid: $$('#subid').val() || '',
-                status: $$('#status').val() || '',
-                oldpkgid: $$('#oldpackageid').val() || '',
-                verifyHidden: $$('#verifyHidden').val() || '',
-                pkgid: desiredPkgId
-            };
-
-            const planChanged = await ChangePlan(formData, selectedUser.username, cookies);
-
+            const planChanged = await ChangePlan(formData);
             if (planChanged) {
-                await chat.sendMessage(`Plan changed successfully for *${selectedUser.username}* to Package ID *${desiredPkgId}*!`);
+                await chat.sendMessage(`Plan changed successfully for *${formData.username}* to Package ID *${desiredPkgId}*!`);
             } else {
-                await chat.sendMessage(`Failed to change plan for *${selectedUser.username}*. Check package ID and try again.`);
+                await chat.sendMessage(`Failed to change plan for *${formData.username}*. Check package ID and try again.`);
             }
-
         } catch (error) {
-            console.error(`Error processing plan change for ${username}:`, error.message);
+            console.error(`Error processing plan change for ${username} after retries:`, error.message);
             await chat.sendMessage(`An error occurred while processing plan change for *${username}*.`);
         }
     }
@@ -1103,9 +1049,7 @@ const checkComplaintStatus = async (message) => {
 
 const handleAnpUpdate = async (message) => {
     const chat = await message.getChat();
-
     try {
-        // Part 1 & 2: Find the ANP and gather new info (This part is correct and unchanged)
         await chat.sendMessage("Enter Partner Name or ID:");
         const searchTerm = (await waitForReply(message)).body.trim();
         if (!searchTerm) {
@@ -1113,48 +1057,60 @@ const handleAnpUpdate = async (message) => {
             return;
         }
 
-        const cookies = await getCookies();
-        if (!cookies) {
-            await chat.sendMessage("❌ Authentication failed. Cannot search.");
-            return;
-        }
-        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-        const listUrl = `${baseURL}/billcntl/billpartners`;
+        const { match, payloadData } = await withApiAuth(async (cookies) => {
+            const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+            const listUrl = `${baseURL}/billcntl/billpartners`;
+            const listResponse = await axios.get(listUrl, { headers: { 'Cookie': cookieString } });
+            const $ = cheerio.load(listResponse.data);
+            let foundMatch = null;
+            let multipleMatches = [];
+            const normalizedSearch = normalize(searchTerm);
+            $('table#dynamic-table tbody tr').each(function () {
+                const row = $(this);
+                const partnerId = normalize(row.find('td').eq(0).text());
+                const companyName = normalize(row.find('td').eq(1).find('a').text());
+                if (partnerId === normalizedSearch || companyName === normalizedSearch) {
+                    multipleMatches.push({
+                        name: row.find('td').eq(1).find('a').text().trim(),
+                        id: row.find('td').eq(0).text().trim(),
+                        link: row.find('td').eq(1).find('a').attr('href')
+                    });
+                }
+            });
+            if (multipleMatches.length === 0) return { error: `No ANP found matching "${searchTerm}".` };
+            if (multipleMatches.length > 1) return { error: `Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}` };
+            foundMatch = multipleMatches[0];
 
-        const listResponse = await axios.get(listUrl, {
-            headers: {
-                'Cookie': cookieString
-            }
+            const detailUrl = baseURL + foundMatch.link;
+            const detailResponse = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
+            const $$ = cheerio.load(detailResponse.data);
+            const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
+            const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
+            const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
+            let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
+            let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
+
+            const data = {
+                'railwire_test_name': cookies.railwireCookie.value,
+                'partnerid': scrapeHidden('partnerid'), 'cname': scrapeValue("Company Name"), 'cregno': scrapeValue("Company Registration Number"),
+                'caddress': scrapeHtml('caddress'), 'cmanager': scrapeValue("Contact Person"), 'agreementdate': scrapeValue("Railwire Agreement Date"),
+                'agreementno': scrapeValue("Railwire Agreement No"), 'pancard': scrapeHidden('pancard'), 'bank_acholder': scrapeValue("Bank Account Holder Name"),
+                'bank_actype': scrapeValue("Bank Account Type"), 'bank_name': scrapeHtml('bank_name'), 'bank_branch': scrapeHtml('bank_branch'),
+                'bank_acno': scrapeValue("Bank Account No"), 'bank_ifsc': scrapeHidden('bank_ifsc'), 'gstin': gstin, 'sacno': scrapeValue("SAC No"),
+                'ptype': scrapeHtml('ptype'), 'gst_status': scrapeHidden("gststatus1"), 'legalname': scrapeHidden("legalnameval"),
+                'tradename': scrapeHidden("tradenameval"), 'ptnrattid': scrapeHtml('ptnrattid'), 'ptnrlang': scrapeHtml('ptnrlang'),
+                'territory_name': scrapeHidden('territory_name'), 'ring': scrapeValue("Ring"), 'brasip': scrapeValue("BRAS IP"),
+                'switchip': scrapeValue("Switch IP"), 'dropping': scrapeValue("Dropping"), 'interface': scrapeValue("Interface"),
+                'port_number': scrapeValue("Port Number"), 'pop_name': scrapeValue("Pop Name"), 'pop_pincode': scrapeValue("Pop Pin Code"),
+                'ngcomany': scrapeHidden('ngcomany'), 'brmobile': scrapeValue("Bank Registered Mobile No"), 'bremail': scrapeValue("Bank Registered Email ID"),
+                'reject_remark': "", 'onlinesub': "0", 'taxpayertype': 0, 'loc_type': null, 'onrechargeatom': 0, 'bankcheck': '1', 'subonrechargerazorpay': 0
+            };
+            return { match: foundMatch, payloadData: data };
         });
-        const $ = cheerio.load(listResponse.data);
 
-        let match = null;
-        let multipleMatches = [];
-        const normalizedSearch = normalize(searchTerm);
-
-        $('table#dynamic-table tbody tr').each(function() {
-            const row = $(this);
-            const partnerId = normalize(row.find('td').eq(0).text());
-            const companyName = normalize(row.find('td').eq(1).find('a').text());
-
-            if (partnerId === normalizedSearch || companyName === normalizedSearch) {
-                const foundMatch = {
-                    name: row.find('td').eq(1).find('a').text().trim(),
-                    id: row.find('td').eq(0).text().trim(),
-                    link: row.find('td').eq(1).find('a').attr('href')
-                };
-                multipleMatches.push(foundMatch);
-            }
-        });
-
-        if (multipleMatches.length === 0) {
-            await chat.sendMessage(`No ANP found matching "${searchTerm}".`);
+        if (payloadData.error) {
+            await chat.sendMessage(payloadData.error);
             return;
-        } else if (multipleMatches.length > 1) {
-            await chat.sendMessage(`Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
-            return;
-        } else {
-            match = multipleMatches[0];
         }
 
         await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
@@ -1177,136 +1133,39 @@ const handleAnpUpdate = async (message) => {
         const bankReply = await waitForReply(message);
         const updateBankDetails = bankReply.body.trim().toLowerCase() === 'yes';
 
-        // Part 3: Scrape detail page (This part is correct and unchanged)
-        const detailUrl = baseURL + match.link;
-        const detailResponse = await axios.get(detailUrl, {
-            headers: {
-                'Cookie': cookieString
-            }
-        });
-        const $$ = cheerio.load(detailResponse.data);
+        const finalPayload = { ...payloadData, cnumber: newPhoneNumber, cemail: newEmail };
+        if (updateBankDetails) {
+            finalPayload.brmobile = newPhoneNumber;
+            finalPayload.bremail = newEmail;
+        }
 
-        const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
-        const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
-        const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
-
-        let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
-        let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
-
-        const payload = {
-            'railwire_test_name': cookies.railwireCookie.value,
-            'partnerid': scrapeHidden('partnerid'),
-            'cname': scrapeValue("Company Name"),
-            'cregno': scrapeValue("Company Registration Number"),
-            'caddress': scrapeHtml('caddress'),
-            'cmanager': scrapeValue("Contact Person"),
-            'cnumber': newPhoneNumber,
-            'cemail': newEmail,
-            'agreementdate': scrapeValue("Railwire Agreement Date"),
-            'agreementno': scrapeValue("Railwire Agreement No"),
-            'pancard': scrapeHidden('pancard'),
-            'bank_acholder': scrapeValue("Bank Account Holder Name"),
-            'bank_actype': scrapeValue("Bank Account Type"),
-            'bank_name': scrapeHtml('bank_name'),
-            'bank_branch': scrapeHtml('bank_branch'),
-            'bank_acno': scrapeValue("Bank Account No"),
-            'bank_ifsc': scrapeHidden('bank_ifsc'),
-            'gstin': gstin,
-            'sacno': scrapeValue("SAC No"),
-            'ptype': scrapeHtml('ptype'),
-            'gst_status': scrapeHidden("gststatus1"),
-            'legalname': scrapeHidden("legalnameval"),
-            'tradename': scrapeHidden("tradenameval"),
-            'ptnrattid': scrapeHtml('ptnrattid'),
-            'ptnrlang': scrapeHtml('ptnrlang'),
-            'territory_name': scrapeHidden('territory_name'),
-            'ring': scrapeValue("Ring"),
-            'brasip': scrapeValue("BRAS IP"),
-            'switchip': scrapeValue("Switch IP"),
-            'dropping': scrapeValue("Dropping"),
-            'interface': scrapeValue("Interface"),
-            'port_number': scrapeValue("Port Number"),
-            'pop_name': scrapeValue("Pop Name"),
-            'pop_pincode': scrapeValue("Pop Pin Code"),
-            'ngcomany': scrapeHidden('ngcomany'),
-            'brmobile': updateBankDetails ? newPhoneNumber : scrapeValue("Bank Registered Mobile No"),
-            'bremail': updateBankDetails ? newEmail : scrapeValue("Bank Registered Email ID"),
-            'reject_remark': "",
-            'onlinesub': "0",
-            'taxpayertype': 0,
-            'loc_type': null,
-            'onrechargeatom': 0,
-            'bankcheck': '1',
-            'subonrechargerazorpay': 0
-        };
-
-        // --- Part 4: Display ALL data for confirmation, just like the JS snippet ---
-        let confirmationMessage = `*Confirm Details*\n_Changes are highlighted in bold._\n\n`;
-        confirmationMessage += `*Partner ID:* ${payload.partnerid}\n`;
-        confirmationMessage += `*Company Name:* ${payload.cname}\n`;
-        confirmationMessage += `*Nature of Co:* ${payload.ngcomany}\n`;
-        confirmationMessage += `*Company Reg No:* ${payload.cregno}\n`;
-        confirmationMessage += `*Address:* ${payload.caddress}\n`;
-        confirmationMessage += `*Contact Person:* ${payload.cmanager}\n`;
-        confirmationMessage += `*Phone:* *${payload.cnumber}*\n`;
-        confirmationMessage += `*Email Address:* *${payload.cemail}*\n`;
-        confirmationMessage += `*PAN Card:* ${payload.pancard}\n`;
-        confirmationMessage += `*Agreement Date:* ${payload.agreementdate}\n`;
-        confirmationMessage += `*Agreement No:* ${payload.agreementno}\n`;
-        confirmationMessage += `*Partner Type:* ${payload.ptype}\n`;
-        confirmationMessage += `*Territory:* ${payload.territory_name}\n\n`;
-        confirmationMessage += `--- *GST Details* ---\n`;
-        confirmationMessage += `*GSTIN:* ${payload.gstin}\n`;
-        confirmationMessage += `*GST Legal Name:* ${payload.legalname}\n`;
-        confirmationMessage += `*GST Trade Name:* ${payload.tradename}\n`;
-        confirmationMessage += `*GST Status:* ${payload.gst_status}\n`;
-        confirmationMessage += `*SAC No:* ${payload.sacno}\n\n`;
-        confirmationMessage += `--- *Bank Details* ---\n`;
-        confirmationMessage += `*Bank Holder:* ${payload.bank_acholder}\n`;
-        confirmationMessage += `*Bank Acct Type:* ${payload.bank_actype}\n`;
-        confirmationMessage += `*Bank Name:* ${payload.bank_name}\n`;
-        confirmationMessage += `*Bank Branch:* ${payload.bank_branch}\n`;
-        confirmationMessage += `*Bank Acct No:* ${payload.bank_acno}\n`;
-        confirmationMessage += `*Bank IFSC:* ${payload.bank_ifsc}\n`;
-        confirmationMessage += `*Bank Mobile:* ${updateBankDetails ? `*${payload.brmobile}*` : payload.brmobile}\n`;
-        confirmationMessage += `*Bank Email:* ${updateBankDetails ? `*${payload.bremail}*` : payload.bremail}\n\n`;
-        confirmationMessage += `--- *Technical Details* ---\n`;
-        confirmationMessage += `*Ring:* ${payload.ring}\n`;
-        confirmationMessage += `*BRAS IP:* ${payload.brasip}\n`;
-        confirmationMessage += `*Switch IP:* ${payload.switchip}\n`;
-        confirmationMessage += `*Dropping:* ${payload.dropping}\n`;
-        confirmationMessage += `*Interface:* ${payload.interface}\n`;
-        confirmationMessage += `*Port Number:* ${payload.port_number}\n`;
-        confirmationMessage += `*POP Name:* ${payload.pop_name}\n`;
-        confirmationMessage += `*POP Pincode:* ${payload.pop_pincode}\n`;
-
+        let confirmationMessage = `*Confirm Details*\n_Changes are highlighted in bold._\n\n*Partner ID:* ${finalPayload.partnerid}\n*Company Name:* ${finalPayload.cname}\n*Phone:* *${finalPayload.cnumber}*\n*Email Address:* *${finalPayload.cemail}*\n*Bank Mobile:* ${updateBankDetails ? `*${finalPayload.brmobile}*` : finalPayload.brmobile}\n*Bank Email:* ${updateBankDetails ? `*${finalPayload.bremail}*` : finalPayload.bremail}\n\nCorrect? Type *yes* to submit, or anything else to cancel.`;
         await chat.sendMessage(confirmationMessage);
-        await chat.sendMessage("Correct? Type *yes* to submit, or anything else to cancel.");
         const finalConfirmation = await waitForReply(message);
 
-        // --- Part 5: Final Submission (This part is correct and unchanged) ---
         if (finalConfirmation.body.trim().toLowerCase() === 'yes') {
-            const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
-            const updateResponse = await axios.post(updateUrl, new URLSearchParams(payload), {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': cookieString
-                }
+            const updateResponse = await withApiAuth(async (cookies) => {
+                const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
+                const response = await axios.post(updateUrl, new URLSearchParams(finalPayload), {
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                    }
+                });
+                return response.data;
             });
 
-            if (updateResponse.data && (updateResponse.data.STATUS === "OK" || updateResponse.data.STATUS === "BANK VERIFIED")) {
+            if (updateResponse && (updateResponse.STATUS === "OK" || updateResponse.STATUS === "BANK VERIFIED")) {
                 await chat.sendMessage(`ANP details updated successfully for *${match.name}*!`);
             } else {
-                const errorMsg = updateResponse.data ? (updateResponse.data.MESSAGE || updateResponse.data.STATUS) : "Unknown error";
+                const errorMsg = updateResponse ? (updateResponse.MESSAGE || updateResponse.STATUS) : "Unknown error";
                 await chat.sendMessage(`Update failed for *${match.name}*. Server response: ${errorMsg}`);
             }
         } else {
             await chat.sendMessage("Update canceled by user. No changes were made.");
-            return;
         }
-
     } catch (error) {
-        console.error("Error during ANP update:", error.message);
+        console.error("Error during ANP update after retries:", error.message);
         await chat.sendMessage("An unexpected error occurred during the ANP update process.");
     }
 };
@@ -1541,170 +1400,68 @@ const createSLATicket = async (message) => {
 const handleTicketActivation = async (message) => {
     const chat = await message.getChat();
     await chat.sendMessage("*++* Working *++*");
-
     try {
-        // Step 1: Get cookies
-        const cookies = await getCookies();
-        if (!cookies) {
-            await chat.sendMessage("Authentication failed. Try again later.");
-            return;
-        }
+        const { closedCount, skippedCount, closedTickets } = await withApiAuth(async (cookies) => {
+            const client = axios.create({
+                baseURL: 'https://jh.railwire.co.in',
+                headers: {
+                    'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                withCredentials: true,
+            });
+            const pageOffsets = ['', '30', '60'];
+            const tickets = [];
+            for (const offset of pageOffsets) {
+                const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
+                const response = await client.get(url);
+                const $ = cheerio.load(response.data);
+                $('table#results tbody tr').each((i, row) => {
+                    const cells = $(row).find('td');
+                    const respondLink = $(cells[cells.length - 1]).find('a').attr('href');
+                    const statusText = $(cells[7]).text().trim().toLowerCase();
+                    const subjectText = $(cells[4]).text().trim();
+                    const match = respondLink?.match(/\/billticketview\/(\d+)\//);
+                    if (match) {
+                        tickets.push({ ticketId: match[1], viewUrl: respondLink, status: statusText, subject: subjectText.toLowerCase() });
+                    }
+                });
+            }
+            if (tickets.length === 0) return { closedCount: 0, skippedCount: 0, closedTickets: [] };
 
-        const createClient = (cookies) => axios.create({
-            baseURL: 'https://jh.railwire.co.in',
-            headers: {
-                'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            withCredentials: true,
+            let closed = 0, skipped = 0;
+            const processed = [];
+            const autoCloseSubjects = ['no connectivity', 'wireless network issue'];
+
+            for (const ticket of tickets) {
+                if (!['open', 'progress'].includes(ticket.status)) {
+                    skipped++; continue;
+                }
+                const detailRes = await client.get(ticket.viewUrl);
+                const $$ = cheerio.load(detailRes.data);
+                let subscriberId = null;
+                $$('table.table-bordered.table-striped.table-condensed tbody tr').each((i, row) => {
+                    if ($$(row).find('td:first-child').text().trim().toLowerCase() === 'subscriber') {
+                        subscriberId = $$(row).find('td:nth-child(2)').text().trim();
+                    }
+                });
+                const shouldCheckSession = autoCloseSubjects.some(subject => ticket.subject.includes(subject));
+                if (shouldCheckSession && subscriberId) {
+                    const sessionStatus = await checkSessionStatus(subscriberId);
+                    if (sessionStatus === 'Active') {
+                        const closePayload = new URLSearchParams({ ticketid: ticket.ticketId, response: 'Dear customer, link has been restored.', railwire_test_name: cookies.railwireCookie.value });
+                        const closeResponse = await client.post('/crmcntl/close_ticket', closePayload.toString());
+                        if (closeResponse.status === 200) {
+                            closed++;
+                            processed.push({ ticketId: ticket.ticketId, subscriberId: subscriberId });
+                        } else { skipped++; }
+                    } else { skipped++; }
+                } else { skipped++; }
+            }
+            return { closedCount: closed, skippedCount: skipped, closedTickets: processed };
         });
 
-        const client = createClient(cookies);
-        const pageOffsets = ['', '30', '60'];
-        const tickets = [];
-
-        // Step 2: Fetch tickets from pages
-        for (const offset of pageOffsets) {
-            const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
-            const response = await client.get(url);
-            const $ = cheerio.load(response.data);
-
-            $('table#results tbody tr').each((i, row) => {
-                const cells = $(row).find('td');
-                const respondLink = $(cells[cells.length - 1]).find('a').attr('href');
-                const statusText = $(cells[7]).text().trim().toLowerCase();
-                const subjectText = $(cells[4]).text().trim();
-                const match = respondLink?.match(/\/billticketview\/(\d+)\//);
-                if (match) {
-                    tickets.push({
-                        ticketId: match[1],
-                        viewUrl: respondLink,
-                        status: statusText,
-                        subject: subjectText.toLowerCase(),
-                    });
-                }
-            });
-        }
-
-        if (tickets.length === 0) {
-            await chat.sendMessage("No tickets found.");
-            return;
-        }
-
-        let closedCount = 0;
-        let skippedCount = 0;
-        const processedTickets = [];
-
-        // Step 3: Process each ticket - only handle open/progress with active sessions
-        for (const ticket of tickets) {
-            // Skip if not open or progress
-            if (!['open', 'progress'].includes(ticket.status)) {
-                skippedCount++;
-                processedTickets.push({
-                    ticketId: ticket.ticketId,
-                    status: 'skipped',
-                    reason: 'Not open/progress status',
-                    subject: ticket.subject,
-                });
-                continue;
-            }
-
-            // Get subscriber ID from ticket details
-            const detailRes = await client.get(ticket.viewUrl);
-            const $$ = cheerio.load(detailRes.data);
-            let subscriberId = null;
-
-            $$('table.table-bordered.table-striped.table-condensed tbody tr').each((i, row) => {
-                const label = $$(row).find('td:first-child').text().trim().toLowerCase();
-                const value = $$(row).find('td:nth-child(2)').text().trim();
-                if (label === 'subscriber') {
-                    subscriberId = value;
-                }
-            });
-
-            ticket.subscriberId = subscriberId || 'N/A';
-
-            // Only check connectivity-related tickets
-            const autoCloseSubjects = ['no connectivity', 'wireless network issue'];
-            const shouldCheckSession = autoCloseSubjects.some(subject =>
-                ticket.subject.includes(subject)
-            );
-
-            if (shouldCheckSession && subscriberId) {
-                try {
-                    const sessionStatus = await checkSessionStatus(client, cookies, subscriberId);
-                    if (sessionStatus === 'Active') {
-                        // Close the ticket
-                        const closePayload = new URLSearchParams({
-                            ticketid: ticket.ticketId,
-                            response: 'Dear customer, link has been restored.',
-                            railwire_test_name: cookies.railwireCookie.value,
-                        });
-
-                        const closeResponse = await client.post('/crmcntl/close_ticket', closePayload.toString());
-
-                        if (closeResponse.status === 200) {
-                            closedCount++;
-                            processedTickets.push({
-                                ticketId: ticket.ticketId,
-                                subscriberId: ticket.subscriberId,
-                                status: 'closed',
-                                reason: 'Connection restored',
-                                subject: ticket.subject,
-                            });
-                        } else {
-                            skippedCount++;
-                            processedTickets.push({
-                                ticketId: ticket.ticketId,
-                                subscriberId: ticket.subscriberId,
-                                status: 'skipped',
-                                reason: 'Close request failed',
-                                subject: ticket.subject,
-                            });
-                        }
-                    } else {
-                        // Session not active - skip
-                        skippedCount++;
-                        processedTickets.push({
-                            ticketId: ticket.ticketId,
-                            subscriberId: ticket.subscriberId,
-                            status: 'skipped',
-                            reason: 'Session not active',
-                            subject: ticket.subject,
-                        });
-                    }
-                } catch (err) {
-                    skippedCount++;
-                    processedTickets.push({
-                        ticketId: ticket.ticketId,
-                        subscriberId: ticket.subscriberId,
-                        status: 'skipped',
-                        reason: `Session check failed: ${err.message}`,
-                        subject: ticket.subject,
-                    });
-                }
-            } else {
-                // Not a connectivity ticket or no subscriber ID - skip
-                skippedCount++;
-                processedTickets.push({
-                    ticketId: ticket.ticketId,
-                    subscriberId: ticket.subscriberId,
-                    status: 'skipped',
-                    reason: shouldCheckSession ? 'No subscriber ID' : 'Not connectivity issue',
-                    subject: ticket.subject,
-                });
-            }
-        }
-
-        // Step 4: Simple summary
-        let ticketSummary = "🎯 *Ticket Processing Results*\n\n";
-
-        ticketSummary += `*📊 Summary:*\n\n`;
-        ticketSummary += `✅ ${closedCount} Closed (Session Active)\n`;
-        ticketSummary += `⏭️ ${skippedCount} Skipped (Various Reasons)\n\n`;
-
-        const closedTickets = processedTickets.filter(t => t.status === 'closed');
-
+        let ticketSummary = `🎯 *Ticket Processing Results*\n\n*📊 Summary:*\n\n✅ ${closedCount} Closed (Session Active)\n⏭️ ${skippedCount} Skipped (Various Reasons)\n\n`;
         if (closedTickets.length > 0) {
             ticketSummary += `*🔒 Closed (${closedTickets.length}):*\n`;
             for (const ticket of closedTickets) {
@@ -1712,171 +1469,123 @@ const handleTicketActivation = async (message) => {
             }
             ticketSummary += `\n`;
         }
-
         await chat.sendMessage(ticketSummary);
-
     } catch (error) {
-        console.error('Error in handleTicketActivation:', error);
+        console.error('Error in handleTicketActivation after retries:', error);
         await chat.sendMessage(`Error processing tickets: ${error.message}`);
     }
 };
 
 // Helper function to check session status
-async function checkSessionStatus(client, cookies, subscriberCode) {
+async function checkSessionStatus(subscriberCode) {
     try {
-        const payload = new URLSearchParams({
-            railwire_test_name: cookies.railwireCookie.value,
-            'user-search': subscriberCode
+        return await withApiAuth(async (cookies) => {
+            const client = axios.create({
+                baseURL: 'https://jh.railwire.co.in',
+                headers: {
+                    'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                withCredentials: true,
+            });
+            const payload = new URLSearchParams({ railwire_test_name: cookies.railwireCookie.value, 'user-search': subscriberCode });
+            const searchRes = await client.post('/billcntl/searchsub', payload.toString());
+            const $ = cheerio.load(searchRes.data);
+            const detailLink = $('a[href^="/billcntl/subscriptiondetail/"]').attr('href');
+            if (!detailLink) throw new Error('Subscriber detail link not found');
+
+            const detailPageRes = await client.get(detailLink);
+            const $$ = cheerio.load(detailPageRes.data);
+            const dataUsageLink = $$('a[href^="/billcntl/currentmonthdatause/"]').attr('href');
+            if (!dataUsageLink) throw new Error('Data usage link not found');
+
+            const usagePageRes = await client.get(dataUsageLink);
+            const $$$ = cheerio.load(usagePageRes.data);
+            const sessionActive = $$$('#cusdiscon_btn').length > 0;
+            return sessionActive ? 'Active' : 'Not Active';
         });
-
-        // Step 1: Search subscriber
-        const searchRes = await client.post('/billcntl/searchsub', payload.toString());
-        const $ = cheerio.load(searchRes.data);
-        const detailLink = $('a[href^="/billcntl/subscriptiondetail/"]').attr('href');
-
-        if (!detailLink) {
-            throw new Error('Subscriber detail link not found');
-        }
-
-        // Step 2: Get subscriber detail page
-        const detailPageRes = await client.get(detailLink);
-        const $$ = cheerio.load(detailPageRes.data);
-
-        // Step 3: Check session status via data usage page
-        const dataUsageLink = $$('a[href^="/billcntl/currentmonthdatause/"]').attr('href');
-        if (!dataUsageLink) {
-            throw new Error('Data usage link not found');
-        }
-
-        const usagePageRes = await client.get(dataUsageLink);
-        const $$$ = cheerio.load(usagePageRes.data);
-
-        // Check if disconnect button exists (indicates active session)
-        const sessionActive = $$$('#cusdiscon_btn').length > 0;
-
-        return sessionActive ? 'Active' : 'Not Active';
     } catch (err) {
-        console.warn(`Session status check failed for ${subscriberCode}:`, err.message);
+        console.warn(`Session status check failed for ${subscriberCode} after retries:`, err.message);
         return 'Not Active';
     }
 }
 
-async function ChangePlan(formData, username, cookies) {
-    const url = 'https://jh.railwire.co.in/finapis/msp_plan_applynow';
-
-    const railwireCookie = cookies.railwireCookie;
-    const ciSessionCookie = cookies.ciSessionCookie;
-
-
-    if (!railwireCookie || !ciSessionCookie) {
-        throw new Error('Missing required cookies');
-    }
-
-
-    const payload = {
-        verifyHidden: formData.verifyHidden,
-        subid: formData.subid,
-        pkgid: formData.pkgid,
-        status: formData.status,
-        uname: username,
-        oldpkgid: formData.oldpkgid,
-        railwire_test_name: railwireCookie.value
-    };
-
-    const payloadToSend = new URLSearchParams(payload).toString();
-    console.log(payloadToSend);
-
+async function ChangePlan(formData) {
     try {
-        const response = await axios.post(url, payloadToSend, {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': `${railwireCookie.name}=${railwireCookie.value}; ${ciSessionCookie.name}=${ciSessionCookie.value}`
-            }
+        const responseData = await withApiAuth(async (cookies) => {
+            const url = 'https://jh.railwire.co.in/finapis/msp_plan_applynow';
+            const payload = {
+                verifyHidden: formData.verifyHidden,
+                subid: formData.subid,
+                pkgid: formData.pkgid,
+                status: formData.status,
+                uname: formData.username,
+                oldpkgid: formData.oldpkgid,
+                railwire_test_name: cookies.railwireCookie.value
+            };
+            const response = await axios.post(url, new URLSearchParams(payload).toString(), {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                }
+            });
+            return response.data;
         });
-        console.log(`Plan changed : "${response.data.STATUS}"`);
-
-        return response.data.STATUS === 'OK';
+        console.log(`Plan changed : "${responseData.STATUS}"`);
+        return responseData.STATUS === 'OK';
     } catch (error) {
-        console.error('\n❌ Error changing plan:');
-        if (error.response) {
-            console.error("Status Code:", error.response.status);
-            console.error("Response Body:\n", JSON.stringify(error.response.data, null, 2));
-        } else {
-            console.error("Message:", error.message);
-        }
+        console.error('\n❌ Error changing plan after retries:', error.message);
         return false;
     }
 }
 
 const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsDeactiveID) => {
     const session = userSessions.get(userIdentifier);
-    if (!session || !session.userCodes || session.userCodes.length === 0) {
+    if (!session || !session.userCodes || !session.userCodes.length === 0) {
         userSessions.delete(userIdentifier);
         return;
     }
 
-    const {
-        userCodes
-    } = session;
-    const cookies = await getCookies();
+    const { userCodes } = session;
     const userDataMap = await loadUserDataFromExcel();
 
-    // Loop through each user code stored in the session
     for (const userCode of userCodes) {
         try {
-        let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
+            let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
+            if (fetchedUserData) {
+                let passwordResetResult = null;
+                let deactivateResult = null;
+                const maskedName = maskName(toTitleCase(fetchedUserData.Name));
+                const maskedId = maskUsername(userCode);
+                let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
 
-        if (fetchedUserData) {
-            // Initialize results for this specific user code
-            let passwordResetResult = null;
-            let deactivateResult = null;
-
-            const maskedName = maskName(toTitleCase(fetchedUserData.Name));
-            const maskedId = maskUsername(userCode);
-            let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
-
-            if (wantsSessionReset) {
-                console.log(`Requested Session Cleaning for ${userCode}...`);
-                const sessionStatus = await resetSession(fetchedUserData, cookies);
-
-                if (sessionStatus === 'SUCCESS') {
-                    responseMessage += '\n*Session clear kr diya gya h* ✅';
-                } else if (sessionStatus === 'NOT_ACTIVE') {
-                    responseMessage += '\nSession active nhi hai ❌';
-                } else {
-                    responseMessage += '\nFailed to reset session ❌';
+                if (wantsSessionReset) {
+                    console.log(`Requested Session Cleaning for ${userCode}...`);
+                    const sessionStatus = await resetSession(fetchedUserData);
+                    if (sessionStatus === 'SUCCESS') responseMessage += '\n*Session clear kr diya gya h* ✅';
+                    else if (sessionStatus === 'NOT_ACTIVE') responseMessage += '\nSession active nhi hai ❌';
+                    else responseMessage += '\nFailed to reset session ❌';
                 }
-            }
-
-            if (wantsDeactiveID) {
-                console.log(`Activating Deactivated ID for ${userCode}...`);
-                deactivateResult = await DeactivateID(fetchedUserData, cookies);
-                responseMessage += '\n' + (deactivateResult ? '*Subscriber activated* ✅' : 'Failed to active ❌');
-            }
-
-            if (wantsPasswordReset) {
-                console.log(`Requested Password Resetting for ${userCode}...`);
-                passwordResetResult = await resetPassword(fetchedUserData, cookies);
-                if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) {
-                    responseMessage += '\n*Reset kr diya gya hai* ✅';
-                } else {
-                    console.log('Reset failed due to Server Issue.');
-                    responseMessage += '\nPassword reset failed';
+                if (wantsDeactiveID) {
+                    console.log(`Activating Deactivated ID for ${userCode}...`);
+                    deactivateResult = await DeactivateID(fetchedUserData);
+                    responseMessage += '\n' + (deactivateResult ? '*Subscriber activated* ✅' : 'Failed to active ❌');
                 }
+                if (wantsPasswordReset) {
+                    console.log(`Requested Password Resetting for ${userCode}...`);
+                    passwordResetResult = await resetPassword(fetchedUserData);
+                    if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) responseMessage += '\n*Reset kr diya gya hai* ✅';
+                    else responseMessage += '\nPassword reset failed';
+                }
+                await message.reply(responseMessage);
+            } else {
+                await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
             }
-
-            await message.reply(responseMessage);
-        } else {
-            console.log(`No user data found for JH code or ID: ${userCode}`);
-            await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
-        }
         } catch (error) {
             console.error(`CRITICAL ERROR processing ${userCode}:`, error.message);
             await message.reply(`Could not process *${userCode}*. The server is not responding. Please try again later.`);
         }
     }
-
-    // Delete the session after processing all user codes
     userSessions.delete(userIdentifier);
 };
 
@@ -2642,60 +2351,34 @@ const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
 
 const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron') => {
     const startTime = new Date();
-    const timeStamp = startTime.toLocaleTimeString('en-US', {
-        hour12: true,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-    });
-
-    console.log(`\n==================== ANP CHECK START ====================`);
-    console.log(`Triggered by: ${triggeredBy} | Time: ${timeStamp}`);
+    const timeStamp = startTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    console.log(`\n==================== ANP CHECK START ====================\nTriggered by: ${triggeredBy} | Time: ${timeStamp}`);
 
     try {
-        console.log(`Getting authentication cookies...`);
-        const billingCookies = await getCookies();
-        if (!billingCookies) throw new Error("ANP Checker: Main auth failed.");
+        const partnerResults = await withApiAuth(async (billingCookies) => {
+            console.log(`Getting NMS session...`);
+            const nmsCookie = await getNmsSession(billingCookies);
+            console.log(`Fetching all partners...`);
+            const allPartners = await getAllPartners(billingCookies);
+            console.log(`Found ${allPartners.length} total partners`);
+            const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
+            console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
 
-        console.log(`Getting NMS session...`);
-        const nmsCookie = await getNmsSession(billingCookies);
-
-        console.log(`Fetching all partners...`);
-        const allPartners = await getAllPartners(billingCookies);
-        console.log(`Found ${allPartners.length} total partners`);
+            const checkPartnerStatus = async (partner) => {
+                const liveCount = await getLiveOnlineCount(partner.id, nmsCookie);
+                const status = liveCount === 'Error' ? 'ERROR' : liveCount === 0 ? 'DOWN' : 'OK';
+                console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status}`);
+                return { ...partner, live_subs: liveCount };
+            };
+            return await processInBatches(partnersToCheck, checkPartnerStatus);
+        });
 
         const extraDetails = loadPartnerLiveDetails();
-        const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
-        console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
-
-        const checkPartnerStatus = async (partner) => {
-            const checkStartTime = new Date().toLocaleTimeString('en-US', {
-                hour12: true,
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit'
-            });
-
-            const liveCount = await getLiveOnlineCount(partner.id, nmsCookie);
-
-            // Enhanced console logging for each partner
-            const status = liveCount === 'Error' ? 'ERROR' :
-                liveCount === 0 ? 'DOWN' :
-                    liveCount < partner.total_subs * 0.8 ? 'LOW' : 'OK';
-
-            console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status} | Time checked: ${checkStartTime}`);
-
-            return { ...partner, live_subs: liveCount };
-        };
-
-        const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
-
         const currentProblemPartners = new Map();
         const recoveredPartners = [];
 
         for (const p of partnerResults) {
             const isDown = p.live_subs === 'Error' || p.live_subs === 0;
-
             if (isDown) {
                 currentProblemPartners.set(p.id, p);
             } else if (downPartnersState.has(p.id)) {
@@ -2716,32 +2399,21 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
             }
         }
 
-        // Alert sending logic
         if (recoveredPartners.length > 0) {
-            console.log(`\n${recoveredPartners.length} partners recovered:`);
             let msg = `*BOT Detected: Partner-Link Up*\n`;
-            recoveredPartners.forEach(p => {
-                console.log(`  ✅ ${p.name}`);
-                msg += `\n✅ *${p.name}*`;
-            });
+            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*`; });
             await sendAnpAlert(msg);
         }
-
         if (stillDownAlerts.length > 0) {
             const ONE_HOUR_MS = 90 * 60 * 1000;
             if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
-                console.log(`\n${stillDownAlerts.length} partners still down (sending hourly report):`);
-                stillDownAlerts.forEach(alert => console.log(`  ${alert}`));
                 await sendAnpAlert(`*Still ANPs Down Report!*\n\n${stillDownAlerts.join('\n')}`);
                 lastStillDownReportTime = Date.now();
             }
         }
-
         if (newAlerts.length > 0) {
-            console.log(`\n${newAlerts.length} new alerts:`);
             newAlerts.sort((a, b) => a.name.localeCompare(b.name));
             for (const p of newAlerts) {
-                console.log(`  🔴 ${p.name} - ${p.live_subs}/${p.total_subs} subscribers`);
                 const details = extraDetails[p.id] || {};
                 const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
                 let msg = `*BOT Detected: Partner Link-Down*\n\n` +
@@ -2752,36 +2424,19 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
                     `*JH Code:* ${details['JH Code'] || 'N/A'}\n` +
                     `*Port:* ${details['Primary Port'] || 'N/A'}\n` +
                     `*BNG:* ${details['BNG'] || 'N/A'}`;
-
                 await sendAnpAlert(msg);
                 await new Promise(resolve => setTimeout(resolve, 100));
             }
         }
-
         if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
             console.log(`✅ All partners healthy - no issues detected`);
         }
-
         const endTime = new Date();
         const duration = ((endTime - startTime) / 1000).toFixed(2);
-        console.log(`==================== ANP CHECK END ====================`);
-        console.log(`Total duration: ${duration} seconds | Completed: ${endTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' })}\n`);
-
+        console.log(`==================== ANP CHECK END ====================\nTotal duration: ${duration} seconds | Completed: ${endTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' })}\n`);
     } catch (error) {
-        console.error(`\n🔴 ANP Check CRITICAL ERROR: ${error.message}`);
-
-        if (!isRetry) {
-            console.log(`🔄 Session may have expired. Clearing caches and retrying once...`);
-            cachedSessionCookies = null;
-            cachedNmsCookie = null;
-
-            // Wait a bit before retry
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            return runAnpStatusCheckAndNotify(true, triggeredBy);
-        } else {
-            console.error(`❌ ANP Checker: Retry failed. The issue is likely persistent.`);
-            console.log(`==================== ANP CHECK FAILED ====================\n`);
-        }
+        console.error(`\n🔴 ANP Check CRITICAL ERROR after retries: ${error.message}`);
+        console.log(`==================== ANP CHECK FAILED ====================\n`);
     }
 };
 
