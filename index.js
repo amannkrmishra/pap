@@ -147,6 +147,7 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     const details = {};
     let subscriberUsername = '';
 
+    // --- Scrape Top Table (This part is correct and remains the same) ---
     $('table.table-bordered.table-striped.table-condensed').first().find('tbody tr').each((i, row) => {
         const key = $(row).find('td:first-child').text().trim().toLowerCase();
         const value = $(row).find('td:nth-child(2)').text().trim();
@@ -161,9 +162,10 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     if (!subscriberUsername) return null;
     details.subscriberUsername = subscriberUsername;
 
-    // FIX 1: Precisely target the subject text within the blue span to avoid extra text.
+    // --- Scrape Subject (This part is correct and remains the same) ---
     details.subject = $('.well.well-lg:contains("Subject :")').find('span.blue').text().trim();
 
+    // --- Fetch Additional Data (This part is correct and remains the same) ---
     const portalUserData = await fetchUserDataFromPortal(subscriberUsername);
     details.customerMobile = portalUserData?.MobileNo || 'N/A';
 
@@ -174,17 +176,20 @@ const getTicketDetails = async (ticketUrl, cookies) => {
         details.partnerName = cachedSubData?.['ANP Name'] || 'N/A';
     }
 
+    // --- THE FIX: Robust Message Scraping ---
     details.messages = [];
-    $('.page-content > .row').each((i, el) => {
-        const authorElement = $(el).find('.col-xs-2 h5.blue');
-        if (authorElement.length > 0) {
-            const author = authorElement.text().trim();
-            const messageContainer = $(el).find('.col-xs-10');
+    // 1. Find all author names, which are unique to message blocks.
+    $('h5.blue').each((i, authorElement) => {
+        const author = $(authorElement).text().trim();
+        
+        // 2. From the author, find the parent row and then the sibling column with the message.
+        const messageContainer = $(authorElement).parent('.col-xs-2').siblings('.col-xs-10');
+        
+        if (messageContainer.length > 0) {
             const timestamp = messageContainer.find('h6.header').text().trim();
-
-            // FIX 2: Robustly get message content by removing the timestamp from the container's text.
-            // This works even if the message isn't inside a <div class="well">.
-            const content = messageContainer.text().replace(timestamp, '').trim();
+            
+            // 3. Get the message content from the 'well' div inside the container.
+            const content = messageContainer.find('.well').text().trim();
 
             if (author && timestamp && content) {
                 details.messages.push({ author, timestamp, content });
