@@ -60,6 +60,8 @@ const COOKIE_CLEANUP_TIME = 600000; // 10 minutes
 let cachedNmsCookie = null; // New cache for the NMS session
 let cookieCleanupTimeout = null;
 let partnerIndex = null;
+let authenticationPromise = null;
+let nmsAuthenticationPromise = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
@@ -140,31 +142,6 @@ const maskUsername = (userCode) => {
     }
 
     return userCode;
-};
-
-const isAuthError = (error) => {
-    if (!error.response) return false;
-    const status = error.response.status;
-    const data = error.response.data || '';
-    return status === 401 || status === 403 || (typeof data === 'string' && data.includes('id="captcha_code"'));
-};
-
-const withApiAuth = async (apiCallLogic, ...args) => {
-    try {
-        const cookies = await getCookies();
-        if (!cookies) throw new Error("Initial authentication failed.");
-        return await apiCallLogic(cookies, ...args);
-    } catch (error) {
-        if (!isAuthError(error)) {
-            throw error;
-        }
-        console.warn(`Authentication error detected. Clearing cache and retrying...`);
-        cachedSessionCookies = null;
-        if (cookieCleanupTimeout) clearTimeout(cookieCleanupTimeout);
-        const newCookies = await getCookies();
-        if (!newCookies) throw new Error("Re-authentication failed.");
-        return await apiCallLogic(newCookies, ...args);
-    }
 };
 
 const createHeaderMap = (header) => header.reduce((acc, col, index) => {
@@ -486,36 +463,75 @@ const handleBulkSubscriberUpdate = async (message) => {
     await chat.sendMessage("Bulk update process finished.");
 };
 
+const withApiAuth = async (apiCallLogic, ...args) => {
+    const cookies = await getCookies();
+    if (!cookies) {
+        throw new Error("Authentication failed - could not get valid session cookies");
+    }
+    
+    return await apiCallLogic(cookies, ...args);
+};
+
 const getCookies = async () => {
-    if (cachedSessionCookies) {
-        console.log('[Auth] Using cached session.');
-        return cachedSessionCookies;
+    if (authenticationPromise) {
+        console.log('[Auth] An Auth. in Progress...');
+        return await authenticationPromise;
     }
 
-    try {
-        console.log('[Auth] No valid session found. Performing full authentication...');
-        const {
-            railwireCookie,
-            ciSessionCookie
-        } = await authenticate('admin', 'Pass@123');
-        cachedSessionCookies = {
-            railwireCookie,
-            ciSessionCookie
-        };
-        
-        // Clear any existing cleanup timeout
-        if (cookieCleanupTimeout) clearTimeout(cookieCleanupTimeout);
-        
-        // Set cleanup timeout for 5 min 30 sec
-        cookieCleanupTimeout = setTimeout(() => {
+    if (cachedSessionCookies) {
+        console.log('[Auth] Cache Cookies Found. Checking..');
+        const isValid = await validateCookies(cachedSessionCookies);
+        if (isValid) {
+            console.log('[Auth] Cached cookies are valid, using them.');
+            return cachedSessionCookies;
+        } else {
+            console.log('[Auth] Cached cookies expired, clearing cache.');
             cachedSessionCookies = null;
-            cookieCleanupTimeout = null;
-        }, COOKIE_CLEANUP_TIME);
+            if (cookieCleanupTimeout) {
+                clearTimeout(cookieCleanupTimeout);
+                cookieCleanupTimeout = null;
+            }
+        }
+    }
+    authenticationPromise = (async () => {
+        try {
+            console.log('[Auth] Performing Fresh Auth..');
+            const { railwireCookie, ciSessionCookie } = await authenticate('admin', 'Pass@123');
+            cachedSessionCookies = { railwireCookie, ciSessionCookie };
+            
+            if (cookieCleanupTimeout) clearTimeout(cookieCleanupTimeout);
+            cookieCleanupTimeout = setTimeout(() => {
+                console.log('[Auth] Cache timeout reached, clearing cookies');
+                cachedSessionCookies = null;
+                cookieCleanupTimeout = null;
+            }, COOKIE_CLEANUP_TIME);
+            
+            return cachedSessionCookies;
+        } catch (err) {
+            console.error('[Auth] Fresh authentication failed:', err.message);
+            return null;
+        } finally {
+            authenticationPromise = null;
+        }
+    })();
+    return await authenticationPromise;
+};
+
+const validateCookies = async (cookies) => {
+    try {
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        const response = await axios.get('https://jh.railwire.co.in/billcntl/kycrejected', {
+            headers: { 'Cookie': cookieString },
+            timeout: 10000,
+            maxRedirects: 0,
+            validateStatus: status => true // Accept any status code
+        });
         
-        return cachedSessionCookies;
-    } catch (err) {
-        console.error('Authentication failed:', err.message);
-        return null;
+        console.log(`[Auth] Cookie validation response: ${response.status}`);
+        return response.status === 200;
+    } catch (error) {
+        console.log(`[Auth] Cookie validation error: ${error.message}`);
+        return false;
     }
 };
 
@@ -1541,7 +1557,7 @@ async function ChangePlan(formData) {
     }
 }
 
-const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsDeactiveID) => {
+const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsActivateID, wantsDeactivateID) => {
     const session = userSessions.get(userIdentifier);
     if (!session || !session.userCodes || !session.userCodes.length === 0) {
         userSessions.delete(userIdentifier);
@@ -1568,10 +1584,16 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
                     else if (sessionStatus === 'NOT_ACTIVE') responseMessage += '\nSession active nhi hai ❌';
                     else responseMessage += '\nFailed to reset session ❌';
                 }
-                if (wantsDeactiveID) {
-                    console.log(`Activating Deactivated ID for ${userCode}...`);
-                    deactivateResult = await DeactivateID(fetchedUserData);
-                    responseMessage += '\n' + (deactivateResult ? '*Subscriber activated* ✅' : 'Failed to active ❌');
+                if (wantsActivateID) {
+                console.log(`Activating ID for ${userCode}...`);
+                const result = await DeactivateID(fetchedUserData);
+                responseMessage += '\n' + (result ? '*Subscriber activated* ✅' : 'Failed to activate ❌');
+                }
+
+                if (wantsDeactivateID) {
+                console.log(`Deactivating ID for ${userCode}...`);
+                const result = await DeactivateID(fetchedUserData);
+                responseMessage += '\n' + (result ? '*Subscriber deactivated* ✅' : 'Failed to deactivate ❌');
                 }
                 if (wantsPasswordReset) {
                     console.log(`Requested Password Resetting for ${userCode}...`);
@@ -1930,154 +1952,159 @@ const handleSubmittedForm = async (link, oltabid, username, originalMessage) => 
 };
 
 const handleIncomingMessage = async (message) => {
-    const chat = await message.getChat();
-    if (chat.isGroup && chat.name === 'Railtel & MSP team Jharkhand') {
-        return;
-    }
-
-    const userIdentifier = getUserIdentifier(message);
-    const messageBody = message.body.toLowerCase().trim().replace(/\s*\.\s*/g, '.');
-    const messageBodyNoSpaces = messageBody.replace(/\s/g, '');
-
-    console.log(`User Detail: ${userIdentifier}`);
-    console.log(`Message: ${messageBody}`);
-
-    const SESSION_TIMEOUT_MS = 300000;
-    const EXECUTION_DELAY_MS = 2780;
-    const codePattern = /jh(\.\w+){2,}/gi;
-    const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
-    const codesFromText = (messageBody.match(codePattern) || []).concat(messageBody.match(subscriberIdPattern) || []);
-
-    const codesFromImage = await extractUsernamesFromImage(message);
-    const codesInThisMessage = [...new Set([...codesFromText, ...codesFromImage])].map(c => c.toLowerCase());
-
-    const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
-    const wantsDeactiveID = /\b(reactive|reactivate|re-active|re-activated|deactivate)\b/i.test(messageBody);
-    const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
-
-    let serviceProvider = null;
-    if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
-    else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
-    else if (/\b(zee5|zee|zee-5)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
-
-    const existingSession = userSessions.get(userIdentifier) || { userCodes: [], pendingActions: {} };
-
-    if (existingSession.abandonmentTimeoutId) clearTimeout(existingSession.abandonmentTimeoutId);
-
-    const combinedUserCodes = [...new Set([...existingSession.userCodes, ...codesInThisMessage])];
-    const combinedActions = { ...existingSession.pendingActions };
-    if (wantsSessionReset) combinedActions.wantsSessionReset = true;
-    if (wantsDeactiveID) combinedActions.wantsDeactiveID = true;
-    if (wantsPasswordReset) combinedActions.wantsPasswordReset = true;
-    if (serviceProvider) combinedActions.serviceProvider = serviceProvider;
-
-    const hasData = combinedUserCodes.length > 0;
-    const hasAction = Object.keys(combinedActions).length > 0;
-
-    const updatedSession = {
-        ...existingSession,
-        userCodes: combinedUserCodes,
-        pendingActions: combinedActions,
-        lastUpdated: Date.now()
-    };
-    userSessions.set(userIdentifier, updatedSession);
-
-    if (hasData && hasAction) {
-        if (updatedSession.executionTimeoutId) clearTimeout(updatedSession.executionTimeoutId);
-
-        const newExecutionTimeoutId = setTimeout(() => {
-            const sessionToProcess = userSessions.get(userIdentifier);
-            if (!sessionToProcess) return;
-
-            if (sessionToProcess.pendingActions.serviceProvider) {
-                userSessions.set(userIdentifier, { ...sessionToProcess, userCode: sessionToProcess.userCodes[0] });
-                processOTTComplaint(message, userIdentifier, sessionToProcess.pendingActions.serviceProvider);
-            } else {
-                processActions(message, userIdentifier,
-                    sessionToProcess.pendingActions.wantsSessionReset,
-                    sessionToProcess.pendingActions.wantsPasswordReset,
-                    sessionToProcess.pendingActions.wantsDeactiveID
-                );
-            }
-        }, EXECUTION_DELAY_MS);
-
-        updatedSession.executionTimeoutId = newExecutionTimeoutId;
-
-    } else {
-        updatedSession.abandonmentTimeoutId = setTimeout(() => userSessions.delete(userIdentifier), SESSION_TIMEOUT_MS);
-    }
-
-    if (messageBodyNoSpaces.includes('subscount') || messageBodyNoSpaces.includes('subscribercount')) {
-        const count = await getSubscriberCount();
-        const formattedTime = new Date().toLocaleTimeString('en-US');
-        const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\nTo check anytime type: *subscount*`;
-        await message.reply(replyMessage);
-        return;
-    }
-
-    if (messageBody.startsWith('search ')) {
-        const searchTerm = message.body.substring(7).trim();
-        await handleSubscriberSearch(message, searchTerm);
-        return;
-    }
-
-    if (messageBodyNoSpaces.includes('anpcheck') || messageBodyNoSpaces.includes('apncheck')) {
-        await message.reply('ANP Status Check Started...');
-        try {
-            await runAnpStatusCheckAndNotify(false, 'manual');
-            await message.reply('ANP Status Check Completed ✅');
-        } catch (error) {
-            console.error('Manual ANP check failed:', error.message);
-            await message.reply('ANP Status Check Failed ❌');
+    try {
+        const chat = await message.getChat();
+        const ignoredGroupNames = ['Railtel & MSP team Jharkhand', 'Railwire - Dhanbad Zone'];
+        if (chat.isGroup && ignoredGroupNames.includes(chat.name)) {
+            return;
         }
-        return;
-    }
 
-    if (messageBodyNoSpaces.includes('anpupdate')) {
-        await handleAnpUpdate(message);
-        return;
-    }
+        const userIdentifier = getUserIdentifier(message);
+        const messageBody = message.body.toLowerCase().trim().replace(/\s*\.\s*/g, '.');
+        const messageBodyNoSpaces = messageBody.replace(/\s/g, '');
 
-    if (messageBodyNoSpaces.includes('subsupdate')) {
-        await handleSubscriberUpdate(message);
-        return;
-    }
+        console.log(`User Detail: ${userIdentifier}`);
+        console.log(`Message: ${messageBody}`);
 
-    if (messageBodyNoSpaces.includes('bulksubupdate')) {
-        await handleBulkSubscriberUpdate(message);
-        return;
-    }
+        const SESSION_TIMEOUT_MS = 300000;
+        const EXECUTION_DELAY_MS = 2780;
+        const codePattern = /jh(\.\w+){2,}/gi;
+        const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
+        const codesFromText = (messageBody.match(codePattern) || []).concat(messageBody.match(subscriberIdPattern) || []);
 
-    if (messageBodyNoSpaces.includes('ticketupdate')) {
-        await handleTicketActivation(message);
-        return;
-    }
+        const codesFromImage = await extractUsernamesFromImage(message);
+        const codesInThisMessage = [...new Set([...codesFromText, ...codesFromImage])].map(c => c.toLowerCase());
 
-    if (messageBodyNoSpaces.includes('checkott')) {
-        await checkComplaintStatus(message);
-        return;
-    }
+        const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
+        const wantsActivateID = /\b(reactive|reactivate|re-active|re-activated|deactivate)\b/i.test(messageBody);
+        const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
+        const wantsDeactivateID = /\b(deactivate|deactive)\b/i.test(messageBody);
 
-    if (messageBodyNoSpaces.includes('slastart')) {
-        await createSLATicket(message);
-        return;
-    }
+        let serviceProvider = null;
+        if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
+        else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
+        else if (/\b(zee5|zee|zee-5)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
 
-    if (messageBodyNoSpaces.includes('planchange') || messageBodyNoSpaces.includes('planupdate')) {
-        await handlePlanChange(message);
-        return;
-    }
+        const existingSession = userSessions.get(userIdentifier) || { userCodes: [], pendingActions: {} };
 
-    if (messageBodyNoSpaces.includes('cafupdate')) {
-        try {
+        if (existingSession.abandonmentTimeoutId) clearTimeout(existingSession.abandonmentTimeoutId);
+
+        const combinedUserCodes = [...new Set([...existingSession.userCodes, ...codesInThisMessage])];
+        const combinedActions = { ...existingSession.pendingActions };
+        if (wantsSessionReset) combinedActions.wantsSessionReset = true;
+        if (wantsActivateID) combinedActions.wantsActivateID = true;
+        if (wantsDeactivateID) combinedActions.wantsDeactivateID = true;
+        if (wantsPasswordReset) combinedActions.wantsPasswordReset = true;
+        if (serviceProvider) combinedActions.serviceProvider = serviceProvider;
+
+        const hasData = combinedUserCodes.length > 0;
+        const hasAction = Object.keys(combinedActions).length > 0;
+
+        const updatedSession = {
+            ...existingSession,
+            userCodes: combinedUserCodes,
+            pendingActions: combinedActions,
+            lastUpdated: Date.now()
+        };
+        userSessions.set(userIdentifier, updatedSession);
+
+        if (hasData && hasAction) {
+            if (updatedSession.executionTimeoutId) clearTimeout(updatedSession.executionTimeoutId);
+
+            const newExecutionTimeoutId = setTimeout(() => {
+                const sessionToProcess = userSessions.get(userIdentifier);
+                if (!sessionToProcess) return;
+
+                if (sessionToProcess.pendingActions.serviceProvider) {
+                    userSessions.set(userIdentifier, { ...sessionToProcess, userCode: sessionToProcess.userCodes[0] });
+                    processOTTComplaint(message, userIdentifier, sessionToProcess.pendingActions.serviceProvider);
+                } else {
+                    processActions(message, userIdentifier,
+                        sessionToProcess.pendingActions.wantsSessionReset,
+                        sessionToProcess.pendingActions.wantsPasswordReset,
+                        sessionToProcess.pendingActions.wantsActivateID,
+                        sessionToProcess.pendingActions.wantsDeactivateID
+                    );
+                }
+            }, EXECUTION_DELAY_MS);
+
+            updatedSession.executionTimeoutId = newExecutionTimeoutId;
+
+        } else {
+            updatedSession.abandonmentTimeoutId = setTimeout(() => userSessions.delete(userIdentifier), SESSION_TIMEOUT_MS);
+        }
+
+        if (messageBodyNoSpaces.includes('subscount') || messageBodyNoSpaces.includes('subscribercount')) {
+            const count = await getSubscriberCount();
+            const formattedTime = new Date().toLocaleTimeString('en-US');
+            const replyMessage = `*Time:* ${formattedTime}\n*Active Subscriber:* *${count}*\nTo check anytime type: *subscount*`;
+            await message.reply(replyMessage);
+            return;
+        }
+
+        if (messageBody.startsWith('search ')) {
+            const searchTerm = message.body.substring(7).trim();
+            await handleSubscriberSearch(message, searchTerm);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('anpcheck') || messageBodyNoSpaces.includes('apncheck')) {
+            await message.reply('ANP Status Check Started...');
+            try {
+                await runAnpStatusCheckAndNotify(false, 'manual');
+                await message.reply('ANP Status Check Completed');
+            } catch (error) {
+                console.error('Manual ANP check failed:', error.message);
+                await message.reply('ANP Status Check Failed');
+            }
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('anpupdate')) {
+            await handleAnpUpdate(message);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('subsupdate')) {
+            await handleSubscriberUpdate(message);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('bulksubupdate')) {
+            await handleBulkSubscriberUpdate(message);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('ticketupdate')) {
+            await handleTicketActivation(message);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('checkott')) {
+            await checkComplaintStatus(message);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('slastart')) {
+            await createSLATicket(message);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('planchange') || messageBodyNoSpaces.includes('planupdate')) {
+            await handlePlanChange(message);
+            return;
+        }
+
+        if (messageBodyNoSpaces.includes('cafupdate')) {
             await message.reply('eKYC Checking..');
             const totalProcessed = await processAllForms(message);
             await message.reply(`Completed: ${totalProcessed}`);
-        } catch (error) {
-            console.error('CAF Update process failed:', error.message);
-            await message.reply('Failed to process CAF updates. Authentication may have failed.');
         }
-        return;
+    } catch (error) {
+        try {
+        } catch (replyError) {
+            console.error('Failed to send the error reply to the user:', replyError);
+        }
     }
 };
 
@@ -2189,27 +2216,44 @@ const processInBatches = async (items, asyncFn, batchSize = 15) => {
 };
 
 const getNmsSession = async (billingCookies) => {
-    if (cachedNmsCookie) {
-        console.log('[NMS Auth] Using cached NMS session.');
-        return cachedNmsCookie;
+    // If an NMS authentication is in progress, wait for it to complete.
+    if (nmsAuthenticationPromise) {
+        console.log('[NMS Auth] NMS auth. in progress..');
+        return await nmsAuthenticationPromise;
     }
 
-    console.log('[NMS Auth] No valid NMS session found. Performing NMS authentication...');
-    const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
-    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
+    if (cachedNmsCookie) {
+        console.log('[NMS Auth] Using cached NMS session.');
+        // Optional: Add a validation step here if possible, similar to the main getCookies function.
+        return cachedNmsCookie;
+    }
+    nmsAuthenticationPromise = (async () => {
+        try {
+            console.log('[NMS Auth] No valid NMS session found. Re-Auth..');
+            const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
+            const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
 
-    const $ = cheerio.load(data);
-    const nmsUsername = $('#srvs_redi input[name="username"]').val();
-    const nmsPassword = $('#srvs_redi input[name="password"]').val();
-    if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
+            const $ = cheerio.load(data);
+            const nmsUsername = $('#srvs_redi input[name="username"]').val();
+            const nmsPassword = $('#srvs_redi input[name="password"]').val();
+            if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
 
-    const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
+            const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
 
-    if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
-    const nmsCookie = headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+            if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
+            const nmsCookie = headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
 
-    cachedNmsCookie = nmsCookie;
-    return nmsCookie;
+            cachedNmsCookie = nmsCookie;
+            return nmsCookie;
+        } catch (error) {
+            console.error(`[NMS Auth] NMS authentication critical error: ${error.message}`);
+            return null;
+        } finally {
+            nmsAuthenticationPromise = null;
+        }
+    })();
+    
+    return await nmsAuthenticationPromise;
 };
 
 const getAllPartners = async (billingCookies) => {
