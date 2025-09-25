@@ -130,13 +130,19 @@ const formatTicketMessage = (details) => {
         `*Cluster:* ${details.cluster}\n` +
         `*Partner:* ${details.partnerName}\n`;
 
-    details.messages.forEach(msg => {
-        message += `\n*Msg at ${msg.timestamp}:*\n` +
-            `${msg.author}:\n${msg.content}\n`;
-    });
+    // New, cleaner message formatting
+    if (details.messages.length > 0) {
+        message += `\n`; // Add a space before the first message
+        details.messages.forEach(msg => {
+            message += `${msg.timestamp}:\n` +
+                       `${msg.author}:\n${msg.content}\n\n`;
+        });
+    }
 
-    return message;
+    // Trim the final trailing newlines for a clean look
+    return message.trim();
 };
+
 
 const getTicketDetails = async (ticketUrl, cookies) => {
     const { data } = await axios.get(`https://jh.railwire.co.in${ticketUrl}`, {
@@ -147,7 +153,6 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     const details = {};
     let subscriberUsername = '';
 
-    // --- Scrape Top Table (This part is correct and remains the same) ---
     $('table.table-bordered.table-striped.table-condensed').first().find('tbody tr').each((i, row) => {
         const key = $(row).find('td:first-child').text().trim().toLowerCase();
         const value = $(row).find('td:nth-child(2)').text().trim();
@@ -162,10 +167,11 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     if (!subscriberUsername) return null;
     details.subscriberUsername = subscriberUsername;
 
-    // --- Scrape Subject (This part is correct and remains the same) ---
-    details.subject = $('.well.well-lg:contains("Subject :")').find('span.blue').text().trim();
+    // Final Fix: Clone the element, remove the "Add Attachment" span, then get the text.
+    const subjectContainer = $('.well.well-lg:contains("Subject :")');
+    subjectContainer.find('span[style="float:right;"]').remove(); // Remove the attachment part
+    details.subject = subjectContainer.text().replace('Subject :', '').trim();
 
-    // --- Fetch Additional Data (This part is correct and remains the same) ---
     const portalUserData = await fetchUserDataFromPortal(subscriberUsername);
     details.customerMobile = portalUserData?.MobileNo || 'N/A';
 
@@ -176,19 +182,13 @@ const getTicketDetails = async (ticketUrl, cookies) => {
         details.partnerName = cachedSubData?.['ANP Name'] || 'N/A';
     }
 
-    // --- THE FIX: Robust Message Scraping ---
     details.messages = [];
-    // 1. Find all author names, which are unique to message blocks.
     $('h5.blue').each((i, authorElement) => {
         const author = $(authorElement).text().trim();
-        
-        // 2. From the author, find the parent row and then the sibling column with the message.
         const messageContainer = $(authorElement).parent('.col-xs-2').siblings('.col-xs-10');
         
         if (messageContainer.length > 0) {
             const timestamp = messageContainer.find('h6.header').text().trim();
-            
-            // 3. Get the message content from the 'well' div inside the container.
             const content = messageContainer.find('.well').text().trim();
 
             if (author && timestamp && content) {
@@ -199,6 +199,7 @@ const getTicketDetails = async (ticketUrl, cookies) => {
 
     return details;
 };
+
 
 const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     console.log(`Running ticket check, triggered by: ${triggeredBy}...`);
