@@ -65,6 +65,8 @@ let nmsAuthenticationPromise = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
+let processedTicketIds = new Set();
+const downPartnersState = new Map();
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
     TARGET_ID: '916200493605@c.us',
@@ -78,7 +80,11 @@ const ANP_CONFIG = {
     ])
 };
 
-const downPartnersState = new Map();
+const TICKET_MONITOR_CONFIG = {
+    TARGET_ID: '916200493605@c.us',
+    CRON_SCHEDULE: '*/5 * * * *'
+};
+
 
 const sendAnpAlert = async (message) => {
 
@@ -101,6 +107,140 @@ const normalize = (str) => str?.toString().trim().toLowerCase() || '';
 const generateRandomMobile = () => {
     const randomDigits = Math.floor(100000000 + Math.random() * 900000000).toString();
     return `5${randomDigits}`;
+};
+
+const sendTicketAlert = async (message) => {
+    try {
+        const chat = await client.getChatById(TICKET_MONITOR_CONFIG.TARGET_ID);
+        await chat.sendMessage(message);
+        console.log(`Successfully sent ticket alert to ${TICKET_MONITOR_CONFIG.TARGET_ID}`);
+    } catch (error) {
+        console.error(`Failed to send ticket alert: ${error.message}`);
+    }
+};
+
+const formatTicketMessage = (details) => {
+    let message = `*Ticket #${details.ticketId}:*\n\n` +
+        `*Subscriber:* ${details.subscriberUsername}\n` +
+        `*Customer No.:* ${details.customerMobile}\n` +
+        `*Status:* ${details.status}\n` +
+        `*Time opened:* ${details.timeOpened}\n` +
+        `*Subject:* ${details.subject}\n` +
+        `*District:* ${details.district}\n` +
+        `*Cluster:* ${details.cluster}\n` +
+        `*Partner:* ${details.partnerName}\n`;
+
+    details.messages.forEach(msg => {
+        message += `\n*Msg at ${msg.timestamp}:*\n` +
+            `${msg.author}:\n${msg.content}\n`;
+    });
+
+    return message;
+};
+
+const getTicketDetails = async (ticketUrl, cookies) => {
+    const { data } = await axios.get(`https://jh.railwire.co.in${ticketUrl}`, {
+        headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
+    });
+    const $ = cheerio.load(data);
+
+    const details = {};
+    let subscriberUsername = '';
+
+    $('table.table-bordered.table-striped.table-condensed').first().find('tbody tr').each((i, row) => {
+        const key = $(row).find('td:first-child').text().trim().toLowerCase();
+        const value = $(row).find('td:nth-child(2)').text().trim();
+        
+        if (key === 'ticket id') details.ticketId = value;
+        if (key === 'subscriber') subscriberUsername = value;
+        if (key === 'status') details.status = value;
+        if (key === 'time opened') details.timeOpened = value;
+        if (key === 'help desk') details.partnerName = value.includes('(') ? value.split('(').pop().replace(')', '').trim() : value;
+    });
+
+    if (!subscriberUsername) return null;
+    details.subscriberUsername = subscriberUsername;
+
+    details.subject = $('.well.well-lg:contains("Subject :")').text().replace('Subject :', '').trim();
+
+    const portalUserData = await fetchUserDataFromPortal(subscriberUsername);
+    details.customerMobile = portalUserData?.MobileNo || 'N/A';
+
+    const cachedSubData = subscriberDataCache.get(normalize(subscriberUsername));
+    details.district = cachedSubData?.['District'] || 'N/A';
+    details.cluster = cachedSubData?.['Cluster'] || 'N/A';
+    if (!details.partnerName) {
+        details.partnerName = cachedSubData?.['ANP Name'] || 'N/A';
+    }
+
+    details.messages = [];
+    $('.page-content > .row').each((i, el) => {
+        const authorElement = $(el).find('.col-xs-2 h5.blue');
+        if (authorElement.length > 0) {
+            const author = authorElement.text().trim();
+            const timestamp = $(el).find('.col-xs-10 h6.header').text().trim();
+            const content = $(el).find('.col-xs-10 .well').text().trim();
+            if (author && timestamp && content) {
+                details.messages.push({ author, timestamp, content });
+            }
+        }
+    });
+
+    return details;
+};
+
+const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
+    console.log(`Running ticket check, triggered by: ${triggeredBy}...`);
+    try {
+        const ticketsToProcess = await withApiAuth(async (cookies) => {
+            const client = axios.create({
+                baseURL: 'https://jh.railwire.co.in',
+                headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
+            });
+
+            const pageOffsets = ['', '30', '60', '90']; // Scrape 4 pages
+            const tickets = [];
+
+            for (const offset of pageOffsets) {
+                const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
+                const response = await client.get(url);
+                const $ = cheerio.load(response.data);
+
+                $('table#results tbody tr').each((i, row) => {
+                    const cells = $(row).find('td');
+                    const status = $(cells[7]).text().trim().toLowerCase();
+                    
+                    if (status === 'open' || status === 'progress') {
+                        const ticketId = $(cells[0]).contents().first().text().trim();
+                        const viewLink = $(cells[cells.length - 1]).find('a').attr('href');
+
+                        if (ticketId && viewLink && !processedTicketIds.has(ticketId)) {
+                            tickets.push({ ticketId, viewLink });
+                        }
+                    }
+                });
+            }
+            return tickets;
+        });
+
+        if (ticketsToProcess.length === 0) {
+            console.log('No new "Open" or "Progress" tickets found.');
+            return;
+        }
+
+        for (const ticket of ticketsToProcess) {
+            console.log(`Found new ticket: #${ticket.ticketId}. Fetching details...`);
+            const ticketDetails = await withApiAuth(cookies => getTicketDetails(ticket.viewLink, cookies));
+            
+            if (ticketDetails) {
+                const formattedMessage = formatTicketMessage(ticketDetails);
+                await sendTicketAlert(formattedMessage);
+                processedTicketIds.add(ticket.ticketId); // Mark as processed to avoid re-sending
+            }
+        }
+    } catch (error) {
+        console.error('Error during ticket monitoring:', error.message);
+    }
 };
 
 const generateRandomEmail = (username) => {
@@ -675,12 +815,13 @@ const authenticate = async (username, password) => {
     });
 };
 
-async function retryOperation(operation, maxRetries = 3, delay = 1000) {
+async function retryOperation(operation, maxRetries = 5, delay = 1000) { 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             return await operation();
         } catch (error) {
             if (attempt === maxRetries) throw error;
+            console.log(`Operation failed on attempt ${attempt}. Retrying...`);
             await new Promise(resolve => setTimeout(resolve, delay * attempt));
         }
     }
@@ -2065,6 +2206,13 @@ const handleIncomingMessage = async (message) => {
             return;
         }
 
+        if (messageBodyNoSpaces.includes('checktickets')) {
+            await message.reply('Manually checking for new tickets...');
+            await monitorAndAlertTickets('manual');
+            await message.reply('Ticket check complete.');
+            return;
+        }
+
         if (messageBodyNoSpaces.includes('subsupdate')) {
             await handleSubscriberUpdate(message);
             return;
@@ -2191,6 +2339,17 @@ client.on('ready', () => {
     cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
         timezone: "Asia/Kolkata"
     });
+
+    // 1. Check for new tickets every 5 minutes
+    cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
+        timezone: "Asia/Kolkata"
+    });
+
+    // 2. Clear the processed ticket cache daily at midnight
+    cron.schedule('0 0 * * *', clearProcessedTickets, {
+        timezone: "Asia/Kolkata"
+    });
+
     console.log('WhatsApp bot ready to use!!');
 });
 
