@@ -59,9 +59,12 @@ let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
+let nmsSessionCache = null;
+let nmsCacheTime = 0;
 let processedTicketIds = new Set();
 let sessionCache = null;
 let cacheTime = 0;
+const userDataCacheByFile = {};
 const downPartnersState = new Map();
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
@@ -83,11 +86,110 @@ const TICKET_MONITOR_CONFIG = {
 
 
 const sendAnpAlert = async (message) => {
-
-    // Send to Daily Count group
     const chats = await client.getChats();
     const group = chats.find(chat => chat.isGroup && chat.name === ANP_CONFIG.GROUP_NAME);
     if (group) await group.sendMessage(message);
+};
+
+// -- Helper Functions Start --
+
+const generateRandomEmail = (username) => {
+    if (!username || typeof username !== 'string') {
+        return `random${Date.now()}@gmail.com`;
+    }
+    const parts = username.split('.');
+    const namePart = parts[parts.length - 1];
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    return `${namePart}${randomNum}@gmail.com`.toLowerCase();
+};
+
+const maskName = (name) => {
+    if (!name || typeof name !== 'string') return 'N/A';
+    const parts = name.trim().split(/\s+/);
+    const maskedParts = parts.map(part => {
+        if (part.length <= 3) {
+            return part;
+        }
+        return part.substring(0, 3) + 'x'.repeat(part.length - 3);
+    });
+    return maskedParts.join(' ');
+};
+
+const maskUsername = (userCode) => {
+    if (!userCode || typeof userCode !== 'string') return 'N/A';
+    const parts = userCode.split('.');
+    if (parts.length >= 3) {
+        const namePart = parts[parts.length - 1];
+        if (namePart.length > 3) {
+            const maskedNamePart = namePart.substring(0, 3) + 'x'.repeat(namePart.length - 3);
+            parts[parts.length - 1] = maskedNamePart;
+        }
+        return parts.join('.');
+    }
+    if (/^\d{5,}$/.test(userCode)) {
+        if (userCode.length <= 3) return userCode;
+        return userCode.substring(0, 3) + 'x'.repeat(userCode.length - 3);
+    }
+
+    return userCode;
+};
+
+const createHeaderMap = (header) => header.reduce((acc, col, index) => {
+    acc[col] = index;
+    return acc;
+}, {});
+
+const extractUsernamesFromImage = async (message) => {
+    if (!message.hasMedia) return [];
+    const media = await message.downloadMedia();
+    if (!media || !media.mimetype.startsWith('image/')) return [];
+
+    try {
+        const imageBuffer = Buffer.from(media.data, 'base64');
+
+        const processedImageBuffer = await sharp(imageBuffer)
+            .greyscale()
+            .normalize()
+            .sharpen()
+            .toBuffer();
+
+        const { data: { text } } = await Tesseract.recognize(
+            processedImageBuffer,
+            'eng'
+        );
+
+        const subscriberIdPattern = /\b\d{5}\b/g;
+        let matches = text.match(subscriberIdPattern) || [];
+
+        if (matches.length > 0) {
+            console.log(`Found Subscriber ID(s): ${matches.join(', ')}`);
+            return [...new Set(matches)];
+        }
+
+        const usernamePattern = /\b(jh\.[a-z0-9\._-]+)\b/gi;
+        matches = text.match(usernamePattern) || [];
+
+        if (matches.length > 0) {
+            console.log(`Found Username(s): ${matches.join(', ')}`);
+        }
+
+        return [...new Set(matches.map(m => m.toLowerCase()))];
+
+    } catch (error) {
+        return [];
+    }
+};
+
+// -- Helper Fuction End --
+
+const sendTicketAlert = async (message) => {
+    try {
+        const chat = await client.getChatById(TICKET_MONITOR_CONFIG.TARGET_ID);
+        await chat.sendMessage(message);
+        console.log(`Successfully alert to ${TICKET_MONITOR_CONFIG.TARGET_ID}`);
+    } catch (error) {
+        console.error(`Failed to send ticket alert: ${error.message}`);
+    }
 };
 
 const toTitleCase = (str) => {
@@ -103,16 +205,6 @@ const normalize = (str) => str?.toString().trim().toLowerCase() || '';
 const generateRandomMobile = () => {
     const randomDigits = Math.floor(100000000 + Math.random() * 900000000).toString();
     return `5${randomDigits}`;
-};
-
-const sendTicketAlert = async (message) => {
-    try {
-        const chat = await client.getChatById(TICKET_MONITOR_CONFIG.TARGET_ID);
-        await chat.sendMessage(message);
-        console.log(`Successfully sent ticket alert to ${TICKET_MONITOR_CONFIG.TARGET_ID}`);
-    } catch (error) {
-        console.error(`Failed to send ticket alert: ${error.message}`);
-    }
 };
 
 const formatTicketMessage = (details) => {
@@ -253,95 +345,6 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     }
 };
 
-
-const generateRandomEmail = (username) => {
-    if (!username || typeof username !== 'string') {
-        return `random${Date.now()}@gmail.com`;
-    }
-    const parts = username.split('.');
-    const namePart = parts[parts.length - 1];
-    const randomNum = Math.floor(1000 + Math.random() * 9000);
-    return `${namePart}${randomNum}@gmail.com`.toLowerCase();
-};
-
-const maskName = (name) => {
-    if (!name || typeof name !== 'string') return 'N/A';
-    const parts = name.trim().split(/\s+/);
-    const maskedParts = parts.map(part => {
-        if (part.length <= 3) {
-            return part;
-        }
-        return part.substring(0, 3) + 'x'.repeat(part.length - 3);
-    });
-    return maskedParts.join(' ');
-};
-
-const maskUsername = (userCode) => {
-    if (!userCode || typeof userCode !== 'string') return 'N/A';
-    const parts = userCode.split('.');
-    if (parts.length >= 3) {
-        const namePart = parts[parts.length - 1];
-        if (namePart.length > 3) {
-            const maskedNamePart = namePart.substring(0, 3) + 'x'.repeat(namePart.length - 3);
-            parts[parts.length - 1] = maskedNamePart;
-        }
-        return parts.join('.');
-    }
-    if (/^\d{5,}$/.test(userCode)) {
-        if (userCode.length <= 3) return userCode;
-        return userCode.substring(0, 3) + 'x'.repeat(userCode.length - 3);
-    }
-
-    return userCode;
-};
-
-const createHeaderMap = (header) => header.reduce((acc, col, index) => {
-    acc[col] = index;
-    return acc;
-}, {});
-
-const extractUsernamesFromImage = async (message) => {
-    if (!message.hasMedia) return [];
-    const media = await message.downloadMedia();
-    if (!media || !media.mimetype.startsWith('image/')) return [];
-
-    try {
-        const imageBuffer = Buffer.from(media.data, 'base64');
-
-        const processedImageBuffer = await sharp(imageBuffer)
-            .greyscale()
-            .normalize()
-            .sharpen()
-            .toBuffer();
-
-        const { data: { text } } = await Tesseract.recognize(
-            processedImageBuffer,
-            'eng'
-        );
-
-        const subscriberIdPattern = /\b\d{5}\b/g;
-        let matches = text.match(subscriberIdPattern) || [];
-
-        if (matches.length > 0) {
-            console.log(`Found Subscriber ID(s): ${matches.join(', ')}`);
-            return [...new Set(matches)];
-        }
-
-        const usernamePattern = /\b(jh\.[a-z0-9\._-]+)\b/gi;
-        matches = text.match(usernamePattern) || [];
-
-        if (matches.length > 0) {
-            console.log(`Found Username(s): ${matches.join(', ')}`);
-        }
-
-        return [...new Set(matches.map(m => m.toLowerCase()))];
-
-    } catch (error) {
-        return [];
-    }
-};
-
-
 const loadAllData = async () => {
     try {
         await Promise.all([
@@ -355,8 +358,6 @@ const loadAllData = async () => {
         console.error('Error loading data:', err.message);
     }
 };
-
-const userDataCacheByFile = {};
 
 const loadUserDataFromExcel = async (filename = 'PortalUsers.xlsx') => {
     if (userDataCacheByFile[filename]) return userDataCacheByFile[filename];
@@ -496,11 +497,11 @@ const loadExcelData = () => {
 const handleSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
     try {
-        await chat.sendMessage("Enter Username or ID:");
+        await chat.sendMessage("Username or ID:");
         const idMessage = await waitForReply(message);
         const userCode = idMessage.body.trim();
         if (!userCode) {
-            await chat.sendMessage("❌ Canceled. No ID provided.");
+            await chat.sendMessage("Canceled. No ID provided.");
             return;
         }
         const userDataMap = await loadUserDataFromExcel();
@@ -629,17 +630,47 @@ const generateQRCode = (qr) => {
 
 
 const authenticate = async (username, password) => {
-    if (sessionCache && Date.now() - cacheTime < 1500000) return sessionCache;
-    sessionCache = await originalAuthenticate(username, password);
+    if (sessionCache && Date.now() - cacheTime < 600000) { // 10 minutes
+        if (nmsSessionCache && Date.now() - nmsCacheTime < 600000) { // 10 minutes
+            return {
+                ...sessionCache,
+                nmsCookie: nmsSessionCache
+            };
+        }
+        try {
+            const nmsCookie = await getNmsSessionFromPortal(sessionCache);
+            nmsSessionCache = nmsCookie;
+            nmsCacheTime = Date.now();
+            return {
+                ...sessionCache,
+                nmsCookie: nmsCookie
+            };
+        } catch (error) {
+            console.log('Failed to get NMS session with cached portal cookies, doing fresh auth...');
+        }
+    }
+    const portalSession = await originalAuthenticate(username, password);
+    sessionCache = portalSession;
     cacheTime = Date.now();
-    return sessionCache;
+
+    try {
+        const nmsCookie = await getNmsSessionFromPortal(portalSession);
+        nmsSessionCache = nmsCookie;
+        nmsCacheTime = Date.now();
+        
+        return {
+            ...portalSession,
+            nmsCookie: nmsCookie
+        };
+    } catch (error) {
+        console.error('Failed to get NMS session:', error.message);
+        return portalSession;
+    }
 };
 
 const originalAuthenticate = async (username, password) => {
     return retryOperation(async () => {
         let sessionCookies = {};
-
-        // Helper function to parse and store cookies from server responses
         function updateAndGetCookieHeader(response) {
             const setCookieHeader = response.headers['set-cookie'];
             if (setCookieHeader) {
@@ -760,6 +791,65 @@ const originalAuthenticate = async (username, password) => {
             throw error; // Re-throw to allow the retryOperation to work
         }
     });
+};
+
+const getNmsSessionFromPortal = async (portalCookies) => {
+    try {
+        // Step 1: Use portal cookies to get NMS credentials from the dashboard
+        const billingCookieString = `${portalCookies.railwireCookie.name}=${portalCookies.railwireCookie.value}; ${portalCookies.ciSessionCookie.name}=${portalCookies.ciSessionCookie.value}`;
+        
+        const { data: nmsLoginPageData } = await axios.get(`${baseURL}/billcntl`, { 
+            headers: { 'Cookie': billingCookieString },
+            timeout: 15000
+        });
+
+        const $ = cheerio.load(nmsLoginPageData);
+        const nmsUsername = $('#srvs_redi input[name="username"]').val();
+        const nmsPassword = $('#srvs_redi input[name="password"]').val();
+        const circle = $('#srvs_redi input[name="circle"]').val();
+
+        if (!nmsUsername || !nmsPassword) {
+            throw new Error("Could not extract NMS credentials from portal dashboard.");
+        }
+
+        console.log('Extracted NMS credentials, authenticating with NMS...');
+
+        // Step 2: Authenticate with NMS using extracted credentials
+        const nmsLoginResponse = await axios.post(
+            `${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`,
+            new URLSearchParams({
+                username: nmsUsername,
+                password: nmsPassword,
+                circle: circle || ''
+            }),
+            {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                maxRedirects: 0,
+                validateStatus: status => status === 302,
+                timeout: 15000
+            }
+        );
+
+        // Step 3: Extract session cookies from NMS response
+        const setCookieHeaders = nmsLoginResponse.headers['set-cookie'];
+        if (!setCookieHeaders || setCookieHeaders.length === 0) {
+            throw new Error("NMS login failed - no session cookies received.");
+        }
+
+        // Parse and format NMS cookies
+        const nmsCookie = setCookieHeaders
+            .map(cookieString => cookieString.split(';')[0])
+            .join('; ');
+
+        console.log('NMS authentication successful!');
+        return nmsCookie;
+
+    } catch (error) {
+        console.error('NMS authentication failed:', error.message);
+        throw error;
+    }
 };
 
 async function retryOperation(operation, maxRetries = 5, delay = 1000) { 
@@ -1662,7 +1752,6 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
             let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
             if (fetchedUserData) {
                 let passwordResetResult = null;
-                let deactivateResult = null;
                 const maskedName = maskName(toTitleCase(fetchedUserData.Name));
                 const maskedId = maskUsername(userCode);
                 let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
@@ -2038,6 +2127,167 @@ const handleSubmittedForm = async (link, oltabid, username, originalMessage) => 
     }
 };
 
+const processInBatches = async (items, asyncFn, batchSize = 15) => {
+    let results = [];
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batchItems = items.slice(i, i + batchSize);
+        const batchPromises = batchItems.map(item => asyncFn(item));
+        const batchResults = await Promise.all(batchPromises);
+        results = results.concat(batchResults);
+    }
+    return results;
+};
+
+const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron') => {
+    const startTime = new Date();
+    const timeStamp = startTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    console.log(`\nTriggered by: ${triggeredBy} | Time: ${timeStamp}`);
+
+    try {
+        // Get both portal and NMS sessions
+        const authData = await authenticate('admin', 'Pass@123');
+        
+        if (!authData.nmsCookie) {
+            throw new Error('Could not obtain NMS session');
+        }
+
+        console.log(`Fetching all partners...`);
+        const allPartners = await getAllPartners(authData);
+        console.log(`Found ${allPartners.length} total partners`);
+        
+        const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
+        console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
+
+        const checkPartnerStatus = async (partner) => {
+            const liveCount = await getLiveOnlineCount(partner.id, authData.nmsCookie);
+            const status = liveCount === 'Error' ? 'ERROR' : liveCount === 0 ? 'DOWN' : 'OK';
+            console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status}`);
+            return { ...partner, live_subs: liveCount };
+        };
+        
+        const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
+
+        const extraDetails = loadPartnerLiveDetails();
+        const currentProblemPartners = new Map();
+        const recoveredPartners = [];
+
+        for (const p of partnerResults) {
+            const isDown = p.live_subs === 'Error' || p.live_subs === 0;
+            if (isDown) {
+                currentProblemPartners.set(p.id, p);
+            } else if (downPartnersState.has(p.id)) {
+                recoveredPartners.push(downPartnersState.get(p.id).details);
+                downPartnersState.delete(p.id);
+            }
+        }
+
+        const newAlerts = [], stillDownAlerts = [];
+        const reportable = [...currentProblemPartners.values()].filter(p => !ANP_CONFIG.IGNORED_PARTNER_IDS.has(p.id));
+
+        for (const p of reportable) {
+            if (downPartnersState.has(p.id)) {
+                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs}) is still down.`);
+            } else {
+                downPartnersState.set(p.id, { firstSeen: Date.now(), details: p });
+                newAlerts.push(p);
+            }
+        }
+
+        if (recoveredPartners.length > 0) {
+            let msg = `*BOT Detected: Partner-Link Up 🎉*\n`;
+            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*`; });
+            await sendAnpAlert(msg);
+        }
+        
+        if (stillDownAlerts.length > 0) {
+            const ONE_HOUR_MS = 90 * 60 * 1000;
+            if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
+                await sendAnpAlert(`*Still ANPs Down Report! ➕*\n\n${stillDownAlerts.join('\n')}`);
+                lastStillDownReportTime = Date.now();
+            }
+        }
+        
+        if (newAlerts.length > 0) {
+            newAlerts.sort((a, b) => a.name.localeCompare(b.name));
+            for (const p of newAlerts) {
+                const details = extraDetails[p.id] || {};
+                const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
+                let msg = `*BOT Detected: Partner Link-Down ❌*\n\n` +
+                    `*Name:* ${p.name} (${details['District'] || 'N/A'})\n` +
+                    `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n` +
+                    `*Contact:* ${details['Contact No'] || 'N/A'}\n` +
+                    `*VLAN (S/C):* ${details['Stack VLAN'] || 'N/A'} / ${details['Customer VLAN'] || 'N/A'}\n` +
+                    `*JH Code:* ${details['JH Code'] || 'N/A'}\n` +
+                    `*Port:* ${details['Primary Port'] || 'N/A'}\n` +
+                    `*BNG:* ${details['BNG'] || 'N/A'}`;
+                await sendAnpAlert(msg);
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+        
+        if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
+            console.log(`✅ All partners healthy - no issues detected`);
+        }
+        
+        const endTime = new Date();
+        const duration = ((endTime - startTime) / 1000).toFixed(2);
+        console.log(`\nTotal duration: ${duration} seconds | Completed: ${endTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' })}\n`);
+    } catch (error) {
+        console.error(`\nANP Check CRITICAL ERROR after retries: ${error.message}`);
+    }
+};
+
+const getAllPartners = async (authData) => {
+    const billingCookieString = `${authData.railwireCookie.name}=${authData.railwireCookie.value}; ${authData.ciSessionCookie.name}=${authData.ciSessionCookie.value}`;
+    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`, { headers: { 'Cookie': billingCookieString, 'Referer': `${baseURL}/billcntl/all_sms_templates` } }));
+
+    const $ = cheerio.load(data);
+    const partners = [];
+    $('table tbody tr').each((i, elem) => {
+        const tds = $(elem).find('td');
+        if (tds.length < 4) return;
+        const partnerId = $(tds[0]).find('input').val();
+        const partnerName = $(tds[2]).text().trim();
+        const totalSubs = parseInt($(tds[3]).text().trim(), 10);
+        if (partnerId && partnerName && !isNaN(totalSubs)) partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
+    });
+    if (partners.length === 0) throw new Error("ANP Checker: Could not find any partners.");
+    return partners;
+};
+
+const getLiveOnlineCount = async (partnerId, nmsCookie) => {
+    try {
+        const { data } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`, new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': nmsCookie, 'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php` }, timeout: 15000 }));
+
+        const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
+        return match ? parseInt(match[1], 10) : null;
+    } catch (error) {
+        console.error(`ANP Checker: Failed to get live count for ${partnerId} after multiple retries: ${error.message}`);
+        return 'Error';
+    }
+};
+
+const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
+    if (partnerLiveDetailsCache) return partnerLiveDetailsCache;
+    try {
+        const filePath = path.join(__dirname, filename);
+        if (!fs.existsSync(filePath)) {
+            return (partnerLiveDetailsCache = {});
+        }
+        const workbook = XLSX.readFile(filePath);
+        const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+        const detailsDict = {};
+        data.forEach(row => {
+            const partnerId = row['Partner ID'] ? String(row['Partner ID']).trim() : null;
+            if (partnerId) detailsDict[partnerId] = row;
+        });
+        return (partnerLiveDetailsCache = detailsDict);
+    } catch (e) {
+        console.error(`ANP Checker ERROR: Failed to load Excel file '${filename}'.`);
+        return (partnerLiveDetailsCache = {});
+    }
+};
+
 const handleIncomingMessage = async (message) => {
     try {
         const chat = await message.getChat();
@@ -2054,7 +2304,7 @@ const handleIncomingMessage = async (message) => {
         console.log(`Message: ${messageBody}`);
 
         const SESSION_TIMEOUT_MS = 300000;
-        const EXECUTION_DELAY_MS = 2780;
+        const EXECUTION_DELAY_MS = 1300;
         const codePattern = /jh(\.\w+){2,}/gi;
         const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
         const codesFromText = (messageBody.match(codePattern) || []).concat(messageBody.match(subscriberIdPattern) || []);
@@ -2153,13 +2403,13 @@ const handleIncomingMessage = async (message) => {
         }
 
         if (messageBodyNoSpaces.includes('checktickets')) {
-            await message.reply('Manually checking for new tickets...');
+            await message.reply('Manually checking for Tickets...');
             await monitorAndAlertTickets('manual');
             await message.reply('Ticket check complete.');
             return;
         }
 
-        if (messageBodyNoSpaces.includes('subsupdate')) {
+        if (messageBodyNoSpaces.includes('subschange')) {
             await handleSubscriberUpdate(message);
             return;
         }
@@ -2169,7 +2419,7 @@ const handleIncomingMessage = async (message) => {
             return;
         }
 
-        if (messageBodyNoSpaces.includes('ticketupdate')) {
+        if (messageBodyNoSpaces.includes('validateticket')) {
             await handleTicketActivation(message);
             return;
         }
@@ -2254,7 +2504,7 @@ client.on('ready', () => {
                             caption: 'Daily Subscriber Report'
                         });
                     } else {
-                        await chat.sendMessage('❌ Failed to download the daily subscriber report.');
+                        await chat.sendMessage('Failed to download the daily subscriber report.');
                     }
                 } catch (err) {
                     console.error(`Failed to send report to ID ${id}:`, err.message);
@@ -2302,175 +2552,5 @@ client.on('message', (message) => {
 
     handleIncomingMessage(message);
 });
-
-const processInBatches = async (items, asyncFn, batchSize = 15) => {
-    let results = [];
-    for (let i = 0; i < items.length; i += batchSize) {
-        const batchItems = items.slice(i, i + batchSize);
-        const batchPromises = batchItems.map(item => asyncFn(item));
-        const batchResults = await Promise.all(batchPromises);
-        results = results.concat(batchResults);
-    }
-    return results;
-};
-
-
-
-const getAllPartners = async (billingCookies) => {
-    const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
-    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`, { headers: { 'Cookie': billingCookieString, 'Referer': `${baseURL}/billcntl/all_sms_templates` } }));
-
-    const $ = cheerio.load(data);
-    const partners = [];
-    $('table tbody tr').each((i, elem) => {
-        const tds = $(elem).find('td');
-        if (tds.length < 4) return;
-        const partnerId = $(tds[0]).find('input').val();
-        const partnerName = $(tds[2]).text().trim();
-        const totalSubs = parseInt($(tds[3]).text().trim(), 10);
-        if (partnerId && partnerName && !isNaN(totalSubs)) partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
-    });
-    if (partners.length === 0) throw new Error("ANP Checker: Could not find any partners.");
-    return partners;
-};
-
-const getLiveOnlineCount = async (partnerId, nmsCookie) => {
-    try {
-        const { data } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`, new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': nmsCookie, 'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php` }, timeout: 15000 }));
-
-        const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
-        return match ? parseInt(match[1], 10) : null;
-    } catch (error) {
-        console.error(`ANP Checker: Failed to get live count for ${partnerId} after multiple retries: ${error.message}`);
-        return 'Error';
-    }
-};
-
-const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
-    if (partnerLiveDetailsCache) return partnerLiveDetailsCache;
-    try {
-        const filePath = path.join(__dirname, filename);
-        if (!fs.existsSync(filePath)) {
-            return (partnerLiveDetailsCache = {});
-        }
-        const workbook = XLSX.readFile(filePath);
-        const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
-        const detailsDict = {};
-        data.forEach(row => {
-            const partnerId = row['Partner ID'] ? String(row['Partner ID']).trim() : null;
-            if (partnerId) detailsDict[partnerId] = row;
-        });
-        return (partnerLiveDetailsCache = detailsDict);
-    } catch (e) {
-        console.error(`ANP Checker ERROR: Failed to load Excel file '${filename}'.`);
-        return (partnerLiveDetailsCache = {});
-    }
-};
-
-const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron') => {
-    const startTime = new Date();
-    const timeStamp = startTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    console.log(`\n==================== ANP CHECK START ====================\nTriggered by: ${triggeredBy} | Time: ${timeStamp}`);
-
-    try {
-        // Step 1: Inline main billing authentication
-        const billingCookies = await authenticate('admin', 'Pass@123');
-        console.log(`Getting NMS session...`);
-
-        // Step 2: Inline NMS session authentication
-        const billingCookieString = `${billingCookies.railwireCookie.name}=${billingCookies.railwireCookie.value}; ${billingCookies.ciSessionCookie.name}=${billingCookies.ciSessionCookie.value}`;
-        const { data: nmsLoginPageData } = await retryOperation(() => axios.get(`${baseURL}/billcntl`, { headers: { 'Cookie': billingCookieString } }));
-
-        const $ = cheerio.load(nmsLoginPageData);
-        const nmsUsername = $('#srvs_redi input[name="username"]').val();
-        const nmsPassword = $('#srvs_redi input[name="password"]').val();
-        if (!nmsUsername || !nmsPassword) throw new Error("ANP Checker: Could not find NMS credentials.");
-
-        const { headers } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/services_rlogin.php`, new URLSearchParams({ username: nmsUsername, password: nmsPassword, circle: $('#srvs_redi input[name="circle"]').val() }), { maxRedirects: 0, validateStatus: status => status === 302 }));
-
-        if (!headers['set-cookie']) throw new Error("ANP Checker: NMS login failed.");
-        const nmsCookie = headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
-        
-        // Step 3: Proceed with the rest of the function's original logic
-        console.log(`Fetching all partners...`);
-        const allPartners = await getAllPartners(billingCookies);
-        console.log(`Found ${allPartners.length} total partners`);
-        const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
-        console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
-
-        const checkPartnerStatus = async (partner) => {
-            const liveCount = await getLiveOnlineCount(partner.id, nmsCookie);
-            const status = liveCount === 'Error' ? 'ERROR' : liveCount === 0 ? 'DOWN' : 'OK';
-            console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status}`);
-            return { ...partner, live_subs: liveCount };
-        };
-        const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
-
-        const extraDetails = loadPartnerLiveDetails();
-        const currentProblemPartners = new Map();
-        const recoveredPartners = [];
-
-        for (const p of partnerResults) {
-            const isDown = p.live_subs === 'Error' || p.live_subs === 0;
-            if (isDown) {
-                currentProblemPartners.set(p.id, p);
-            } else if (downPartnersState.has(p.id)) {
-                recoveredPartners.push(downPartnersState.get(p.id).details);
-                downPartnersState.delete(p.id);
-            }
-        }
-
-        const newAlerts = [], stillDownAlerts = [];
-        const reportable = [...currentProblemPartners.values()].filter(p => !ANP_CONFIG.IGNORED_PARTNER_IDS.has(p.id));
-
-        for (const p of reportable) {
-            if (downPartnersState.has(p.id)) {
-                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs}) is still down.`);
-            } else {
-                downPartnersState.set(p.id, { firstSeen: Date.now(), details: p });
-                newAlerts.push(p);
-            }
-        }
-
-        if (recoveredPartners.length > 0) {
-            let msg = `*BOT Detected: Partner-Link Up*\n`;
-            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*`; });
-            await sendAnpAlert(msg);
-        }
-        if (stillDownAlerts.length > 0) {
-            const ONE_HOUR_MS = 90 * 60 * 1000;
-            if (Date.now() - lastStillDownReportTime >= ONE_HOUR_MS) {
-                await sendAnpAlert(`*Still ANPs Down Report!*\n\n${stillDownAlerts.join('\n')}`);
-                lastStillDownReportTime = Date.now();
-            }
-        }
-        if (newAlerts.length > 0) {
-            newAlerts.sort((a, b) => a.name.localeCompare(b.name));
-            for (const p of newAlerts) {
-                const details = extraDetails[p.id] || {};
-                const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
-                let msg = `*BOT Detected: Partner Link-Down*\n\n` +
-                    `*Name:* ${p.name} (${details['District'] || 'N/A'})\n` +
-                    `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n` +
-                    `*Contact:* ${details['Contact No'] || 'N/A'}\n` +
-                    `*VLAN (S/C):* ${details['Stack VLAN'] || 'N/A'} / ${details['Customer VLAN'] || 'N/A'}\n` +
-                    `*JH Code:* ${details['JH Code'] || 'N/A'}\n` +
-                    `*Port:* ${details['Primary Port'] || 'N/A'}\n` +
-                    `*BNG:* ${details['BNG'] || 'N/A'}`;
-                await sendAnpAlert(msg);
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
-        }
-        if (!recoveredPartners.length && !stillDownAlerts.length && !newAlerts.length) {
-            console.log(`✅ All partners healthy - no issues detected`);
-        }
-        const endTime = new Date();
-        const duration = ((endTime - startTime) / 1000).toFixed(2);
-        console.log(`==================== ANP CHECK END ====================\nTotal duration: ${duration} seconds | Completed: ${endTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' })}\n`);
-    } catch (error) {
-        console.error(`\n🔴 ANP Check CRITICAL ERROR after retries: ${error.message}`);
-        console.log(`==================== ANP CHECK FAILED ====================\n`);
-    }
-};
 
 client.initialize();
