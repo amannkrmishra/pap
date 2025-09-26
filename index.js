@@ -120,6 +120,7 @@ const sendAnpAlert = async (message) => {
 
 // -- Helper Functions Start --
 
+// -- Saves processed ticket IDs to JSON file to prevent duplicate alerts
 const saveProcessedTicketIds = () => {
     try {
         const data = JSON.stringify(Array.from(processedTicketIds));
@@ -129,6 +130,8 @@ const saveProcessedTicketIds = () => {
     }
 };
 
+
+// -- Loads previously processed ticket IDs from JSON file on bot startup
 const loadProcessedTicketIds = () => {
     try {
         if (fs.existsSync(PROCESSED_TICKETS_FILE_PATH)) {
@@ -138,6 +141,34 @@ const loadProcessedTicketIds = () => {
         }
     } catch (error) {
         console.error('Error loading processed ticket IDs:', error.message);
+    }
+};
+
+// -- Saves ANP down state (which partners are currently down) to JSON file
+const saveAnpDownState = () => {
+    try {
+        const data = JSON.stringify(Array.from(downPartnersState.entries()));
+        fs.writeFileSync(ANP_STATE_FILE_PATH, data, 'utf8');
+    } catch (error) {
+        console.error('Error saving ANP down state:', error.message);
+    }
+};
+
+// -- Loads ANP down state from JSON file to maintain state across bot restarts
+const loadAnpDownState = () => {
+    try {
+        if (fs.existsSync(ANP_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(ANP_STATE_FILE_PATH, 'utf8');
+            const entries = JSON.parse(data);
+            const loadedMap = new Map(entries);
+            downPartnersState.clear();
+            for (const [key, value] of loadedMap.entries()) {
+                downPartnersState.set(key, value);
+            }
+            console.log(`Loaded ${downPartnersState.size} down ANP states from file.`);
+        }
+    } catch (error) {
+        console.error('Error loading ANP down state:', error.message);
     }
 };
 
@@ -165,32 +196,7 @@ const loadAnpReportState = () => {
     }
 };
 
-const saveAnpDownState = () => {
-    try {
-        const data = JSON.stringify(Array.from(downPartnersState.entries()));
-        fs.writeFileSync(ANP_STATE_FILE_PATH, data, 'utf8');
-    } catch (error) {
-        console.error('Error saving ANP down state:', error.message);
-    }
-};
-
-const loadAnpDownState = () => {
-    try {
-        if (fs.existsSync(ANP_STATE_FILE_PATH)) {
-            const data = fs.readFileSync(ANP_STATE_FILE_PATH, 'utf8');
-            const entries = JSON.parse(data);
-            const loadedMap = new Map(entries);
-            downPartnersState.clear();
-            for (const [key, value] of loadedMap.entries()) {
-                downPartnersState.set(key, value);
-            }
-            console.log(`Loaded ${downPartnersState.size} down ANP states from file.`);
-        }
-    } catch (error) {
-        console.error('Error loading ANP down state:', error.message);
-    }
-};
-
+// -- Generates random email address based on username for bulk updates
 const generateRandomEmail = (username) => {
     if (!username || typeof username !== 'string') {
         return `random${Date.now()}@gmail.com`;
@@ -201,6 +207,7 @@ const generateRandomEmail = (username) => {
     return `${namePart}${randomNum}@gmail.com`.toLowerCase();
 };
 
+// -- Masks subscriber names by replacing characters with 'x' for privacy
 const maskName = (name) => {
     if (!name || typeof name !== 'string') return 'N/A';
     const parts = name.trim().split(/\s+/);
@@ -213,6 +220,7 @@ const maskName = (name) => {
     return maskedParts.join(' ');
 };
 
+// -- Masks usernames by replacing characters with 'x' for privacy
 const maskUsername = (userCode) => {
     if (!userCode || typeof userCode !== 'string') return 'N/A';
     const parts = userCode.split('.');
@@ -232,11 +240,13 @@ const maskUsername = (userCode) => {
     return userCode;
 };
 
+// -- Creates header mapping from Excel file headers for data processing
 const createHeaderMap = (header) => header.reduce((acc, col, index) => {
     acc[col] = index;
     return acc;
 }, {});
 
+// -- Uses Tesseract OCR to extract usernames/IDs from uploaded images
 const extractUsernamesFromImage = async (message) => {
     if (!message.hasMedia) return [];
     const media = await message.downloadMedia();
@@ -730,41 +740,64 @@ const generateQRCode = (qr) => {
 
 
 const authenticate = async (username, password) => {
-    if (sessionCache && Date.now() - cacheTime < 360000) { // 6 minutes
-        if (nmsSessionCache && Date.now() - nmsCacheTime < 360000) { // 6 minutes
-            return {
-                ...sessionCache,
-                nmsCookie: nmsSessionCache
-            };
+    // 1. Use fresh cache if available (fastest path).
+    if (sessionCache && Date.now() - cacheTime < 282000) { // 4 minute 42 sec.
+        if (nmsSessionCache && Date.now() - nmsCacheTime < 282000) { // 4 minute 42 sec.
+            return { ...sessionCache, nmsCookie: nmsSessionCache };
         }
         try {
             const nmsCookie = await getNmsSessionFromPortal(sessionCache);
             nmsSessionCache = nmsCookie;
             nmsCacheTime = Date.now();
-            return {
-                ...sessionCache,
-                nmsCookie: nmsCookie
-            };
+            return { ...sessionCache, nmsCookie: nmsCookie };
         } catch (error) {
-            console.log('Failed to get NMS session with cached portal cookies, doing fresh auth...');
+            return sessionCache;
         }
     }
-    const portalSession = await originalAuthenticate(username, password);
-    sessionCache = portalSession;
-    cacheTime = Date.now();
 
+    // 2. If cache is stale or missing, try the fast refresh first, then fallback.
     try {
-        const nmsCookie = await getNmsSessionFromPortal(portalSession);
+        // If there's no old session, this will fail and jump straight to the full login.
+        if (!sessionCache?.ciSessionCookie?.value) throw new Error("No session to refresh.");
+
+        console.log('Session stale. Attempting fast refresh...');
+        const response = await axios.get(`${baseURL}/billcntl`, {
+            headers: { 'Cookie': `ci_session=${sessionCache.ciSessionCookie.value}` },
+            maxRedirects: 0,
+            validateStatus: status => status === 200,
+            timeout: 10000
+        });
+
+        const setCookieHeader = response.headers['set-cookie'];
+        const newCiSession = setCookieHeader?.find(c => c.startsWith('ci_session=')).split(';')[0].split('=')[1];
+        const newRailwireCookie = setCookieHeader?.find(c => c.startsWith('railwire_cookie_name=')).split(';')[0].split('=')[1];
+
+        if (!newCiSession || !newRailwireCookie) throw new Error("Refresh failed to return required cookies.");
+
+        // Success! Update cache and time.
+        sessionCache = {
+            railwireCookie: { name: 'railwire_cookie_name', value: newRailwireCookie },
+            ciSessionCookie: { name: 'ci_session', value: newCiSession }
+        };
+        cacheTime = Date.now();
+        console.log('✅ Session refreshed successfully.');
+
+    } catch (error) {
+        // If refresh fails for any reason, perform the full CAPTCHA login as a fallback.
+        console.warn(`Refresh failed: ${error.message}. Performing full login.`);
+        sessionCache = await originalAuthenticate(username, password);
+        cacheTime = Date.now();
+    }
+
+    // 3. Get NMS session after ANY successful portal auth (refresh or full).
+    try {
+        const nmsCookie = await getNmsSessionFromPortal(sessionCache);
         nmsSessionCache = nmsCookie;
         nmsCacheTime = Date.now();
-        
-        return {
-            ...portalSession,
-            nmsCookie: nmsCookie
-        };
+        return { ...sessionCache, nmsCookie: nmsCookie };
     } catch (error) {
         console.error('Failed to get NMS session:', error.message);
-        return portalSession;
+        return sessionCache; // Return portal session even if NMS fails
     }
 };
 
@@ -2361,7 +2394,7 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
             for (const p of newAlerts) {
             const details = extraDetails[p.id] || {};
             const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
-            let msg = `*Detected: Partner Link-Down ❌*\n\n` +
+            let msg = `*Detected: Partner Link-Down 🎟️*\n\n` +
             `*Name:* ${p.name}\n` +
             `*District:* ${details['District'] || 'Not Found'}\n` +
             `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n` +
