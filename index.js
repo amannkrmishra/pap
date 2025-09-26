@@ -80,7 +80,7 @@ const ANP_CONFIG = {
         '3474487439', '5283639869', '2568065682', '2425852224', '6378518993',
         '8878892435', '6834570680', '6195650370', '6933249503', '5950839426',
         '5570382470', '2005592154', '3423963007', '1163822769', '1840251248',
-        '4352542809', '2090233061', '6096321831', '2692518024',
+        '4352542809', '2090233061', '6096321831',
     ])
 };
 
@@ -399,7 +399,7 @@ const getTicketDetails = async (ticketUrl, cookies) => {
 
 const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const client = axios.create({
             baseURL: 'https://jh.railwire.co.in',
             headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
@@ -546,7 +546,7 @@ const loadPartnerMappings = (filename = 'TicketMappingANP.xlsx') => {
 
 const getSubscriberCount = async () => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
 
@@ -638,7 +638,7 @@ const handleSubscriberUpdate = async (message) => {
             return;
         }
 
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const payload = new URLSearchParams({
             'cnumber': newPhoneNumber,
             'cemail': newEmail,
@@ -690,7 +690,7 @@ const handleBulkSubscriberUpdate = async (message) => {
             const newPhoneNumber = generateRandomMobile();
             const newEmail = generateRandomEmail(userData.Username);
 
-            const cookies = await authenticate('admin', 'Pass@123');
+            const cookies = sessionCache;
             const payload = new URLSearchParams({
                 'cnumber': newPhoneNumber,
                 'cemail': newEmail,
@@ -738,47 +738,7 @@ const generateQRCode = (qr) => {
     });
 };
 
-
 const authenticate = async (username, password) => {
-    if (sessionCache && Date.now() - cacheTime < 282000) { // 4 minutes 42 seconds
-    if (nmsSessionCache && Date.now() - nmsCacheTime < 282000) { // 4 minutes 42 seconds
-        return {
-            ...sessionCache,
-            nmsCookie: nmsSessionCache
-        };
-    }
-    try {
-        const nmsCookie = await getNmsSessionFromPortal(sessionCache);
-        nmsSessionCache = nmsCookie;
-        nmsCacheTime = Date.now();
-        return {
-            ...sessionCache,
-            nmsCookie: nmsCookie
-        };
-    } catch (error) {
-        console.log('Failed to get NMS session cache');
-        }
-    }
-    const portalSession = await originalAuthenticate(username, password);
-    sessionCache = portalSession;
-    cacheTime = Date.now();
-
-    try {
-        const nmsCookie = await getNmsSessionFromPortal(portalSession);
-        nmsSessionCache = nmsCookie;
-        nmsCacheTime = Date.now();
-        
-        return {
-            ...portalSession,
-            nmsCookie: nmsCookie
-        };
-    } catch (error) {
-        console.error('Failed to get NMS session:', error.message);
-        return portalSession;
-    }
-};
-
-const originalAuthenticate = async (username, password) => {
     return retryOperation(async () => {
         let sessionCookies = {};
         function updateAndGetCookieHeader(response) {
@@ -977,7 +937,7 @@ async function retryOperation(operation, maxRetries = 5, delay = 1000) {
 
 async function fetchUserDataFromPortal(userCode) {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         const payload = new URLSearchParams({
             'railwire_test_name': cookies.railwireCookie.value,
@@ -1047,7 +1007,7 @@ async function fetchUserDataFromPortal(userCode) {
 
 const resetSession = async (userData) => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
         const config = {
             headers: {
@@ -1074,7 +1034,7 @@ const resetSession = async (userData) => {
 
 const DeactivateID = async (userData) => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const payload = `subid=${userData.SubscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
         const config = {
             headers: {
@@ -1094,7 +1054,7 @@ const DeactivateID = async (userData) => {
 
 const resetPassword = async (userData) => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const config = {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -1163,7 +1123,7 @@ const handlePlanChange = async (message) => {
 
     for (const username of usernames) {
         try {
-            const cookies = await authenticate('admin', 'Pass@123');
+            const cookies = sessionCache;
             const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
             const payload = new URLSearchParams({
                 'railwire_test_name': cookies.railwireCookie.value,
@@ -1363,7 +1323,7 @@ const handleAnpUpdate = async (message) => {
             return;
         }
 
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         const listUrl = `${baseURL}/billcntl/billpartners`;
         const listResponse = await axios.get(listUrl, { headers: { 'Cookie': cookieString } });
@@ -1451,7 +1411,7 @@ const handleAnpUpdate = async (message) => {
         const finalConfirmation = await waitForReply(message);
 
         if (finalConfirmation.body.trim().toLowerCase() === 'yes') {
-            const freshCookiesForUpdate = await authenticate('admin', 'Pass@123'); // Re-auth before final action
+            const freshCookiesForUpdate = sessionCache;
             const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
             const response = await axios.post(updateUrl, new URLSearchParams(finalPayload), {
                 headers: {
@@ -1707,7 +1667,7 @@ const handleTicketActivation = async (message) => {
     const chat = await message.getChat();
     await chat.sendMessage("*++* Working *++*");
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const client = axios.create({
             baseURL: 'https://jh.railwire.co.in',
             headers: {
@@ -1789,7 +1749,7 @@ const handleTicketActivation = async (message) => {
 // Helper function to check session status
 async function checkSessionStatus(subscriberCode) {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const client = axios.create({
             baseURL: 'https://jh.railwire.co.in',
             headers: {
@@ -1821,7 +1781,7 @@ async function checkSessionStatus(subscriberCode) {
 
 async function ChangePlan(formData) {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
+        const cookies = sessionCache;
         const url = 'https://jh.railwire.co.in/finapis/msp_plan_applynow';
         const payload = {
             verifyHidden: formData.verifyHidden,
@@ -2602,7 +2562,7 @@ const handleIncomingMessage = async (message) => {
         if (messageBodyNoSpaces.includes('cafupdate')) {
             await message.reply('eKYC Checking..');
             try {
-                const cookies = await authenticate('admin', 'Pass@123');
+                const cookies = sessionCache;
                 const totalProcessed = await processAllForms(cookies, message);
                 await message.reply(`Completed: ${totalProcessed}`);
             } catch (authError) {
@@ -2624,6 +2584,29 @@ client.on('ready', () => {
     loadAnpReportState();
     loadAllData();
     botStartTime = Date.now();
+    const AUTH_LIFETIME = 282000; // 4 minutes 42 seconds
+    const forceRefreshSession = async () => {
+        try {
+            // Step 1: Get fresh portal cookies
+            const portalSession = await authenticate('admin', 'Pass@123');
+            
+            // Step 2: Use them to get fresh NMS cookies
+            const nmsCookie = await getNmsSessionFromPortal(portalSession);
+            
+            // Step 3: Update the global cache with the fresh data
+            sessionCache = portalSession;
+            nmsSessionCache = nmsCookie;
+            
+            console.log('Cache is up to date.');
+        } catch (err) {
+            console.error('Proactive session refresh failed:', err.message);
+        }
+    };
+
+    forceRefreshSession();
+
+    setInterval(forceRefreshSession, AUTH_LIFETIME);
+
     const scheduledTask = async () => {
         try {
             const count = await getSubscriberCount();
@@ -2636,7 +2619,7 @@ client.on('ready', () => {
 
             let csvMedia = null;
             try {
-                const cookies = await authenticate('admin', 'Pass@123');
+                const cookies = sessionCache;
                 const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
                 const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
                     headers: {
@@ -2721,6 +2704,5 @@ client.on('message', (message) => {
 
     handleIncomingMessage(message);
 });
-
 
 client.initialize();
