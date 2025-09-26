@@ -60,14 +60,11 @@ let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let lastStillDownReportTime = 0;
-let nmsSessionCache = null;
-let nmsCacheTime = 0;
 const PROCESSED_TICKETS_FILE_PATH = path.join(__dirname, 'processedTicketIds.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
 const ANP_REPORT_STATE_FILE_PATH = path.join(__dirname, 'anpReportState.json');
 let processedTicketIds = new Set();
 let sessionCache = null;
-let cacheTime = 0;
 const userDataCacheByFile = {};
 const downPartnersState = new Map();
 // -- Configuration object for ANP (Access Network Provider) monitoring - contains service URLs, target numbers, ignored partner IDs
@@ -2578,121 +2575,116 @@ const handleIncomingMessage = async (message) => {
     }
 };
 
-client.on('ready', () => {
+client.on('ready', async () => { // The handler is now async
+    // --- 1. Initial Data Loading ---
     loadProcessedTicketIds();
     loadAnpDownState();
     loadAnpReportState();
     loadAllData();
     botStartTime = Date.now();
+
+    // --- 2. Define Authentication Refresh Logic ---
     const AUTH_LIFETIME = 282000; // 4 minutes 42 seconds
+
+    // This is the robust version that prevents race conditions
     const forceRefreshSession = async () => {
         try {
-            // Step 1: Get fresh portal cookies
-            const portalSession = await authenticate('admin', 'Pass@123');
-            
-            // Step 2: Use them to get fresh NMS cookies
-            const nmsCookie = await getNmsSessionFromPortal(portalSession);
-            
-            // Step 3: Update the global cache with the fresh data
-            sessionCache = portalSession;
-            nmsSessionCache = nmsCookie;
-            
-            console.log('Cache is up to date.');
+            // Get BOTH fresh sessions into temporary local variables first.
+            const freshPortalSession = await authenticate('admin', 'Pass@123');
+            const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
+
+            // NOW, update the global cache in one atomic step.
+            sessionCache = freshPortalSession;
+            nmsSessionCache = freshNmsCookie;
+
+            console.log('Session Optimized!!!');
         } catch (err) {
-            console.error('Proactive session refresh failed:', err.message);
+            console.error('[TIMER] Proactive session refresh failed:', err.message);
+            // We throw the error so the initial startup can catch it
+            throw err; 
         }
     };
 
-    forceRefreshSession();
+    // --- 3. Perform Initial Authentication and Setup Scheduled Tasks ---
+    try {
+        await forceRefreshSession();
+        console.log('Bot is Ready, Final checks required..');
 
-    setInterval(forceRefreshSession, AUTH_LIFETIME);
-
-    const scheduledTask = async () => {
-        try {
-            const count = await getSubscriberCount();
-            const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
-
-            const targetIds = [
-                '917004501523@c.us', // Rakesh Sir
-                '916200493605@c.us'  // Aman
-            ];
-
-            let csvMedia = null;
+        // Daily Subscriber Count and Report Task
+        const scheduledTask = async () => {
             try {
-                const cookies = sessionCache;
-                const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-                const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
-                    headers: {
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'Cookie': cookieString,
-                        'Sec-Fetch-Dest': 'document',
-                    },
-                    responseType: 'arraybuffer'
-                });
-                if (response.status !== 200) {
-                    throw new Error(`Server responded with status ${response.status}`);
-                }
-                const csvBuffer = response.data;
-
-                const today = new Date();
-                const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
-                const filePath = path.join(__dirname, fileName);
-                fs.writeFileSync(filePath, csvBuffer);
-                csvMedia = MessageMedia.fromFilePath(filePath);
-                console.log('CSV downloaded and prepared for distribution');
-
-            } catch (error) {
-                console.error('Error downloading CSV after retries:', error.message);
-            }
-
-            for (const id of targetIds) {
+                const count = await getSubscriberCount();
+                const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
+                const targetIds = ['917004501523@c.us', '916200493605@c.us'];
+                let csvMedia = null;
                 try {
-                    const chat = await client.getChatById(id);
-                    await chat.sendMessage(message);
-
-                    if (csvMedia) {
-                        await chat.sendMessage(csvMedia, {
-                            caption: 'Daily Subscriber Report'
-                        });
-                    } else {
-                        await chat.sendMessage('Failed to download the daily subscriber report.');
-                    }
-                } catch (err) {
-                    console.error(`Failed to send report to ID ${id}:`, err.message);
-                }
-            }
-            if (csvMedia) {
-                try {
+                    const cookies = sessionCache; // Use the global cache
+                    const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+                    const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
+                        headers: {
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Cookie': cookieString,
+                            'Sec-Fetch-Dest': 'document',
+                        },
+                        responseType: 'arraybuffer'
+                    });
+                    if (response.status !== 200) { throw new Error(`Server responded with status ${response.status}`); }
+                    const csvBuffer = response.data;
                     const today = new Date();
                     const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
                     const filePath = path.join(__dirname, fileName);
-                    fs.unlinkSync(filePath);
-                    console.log('Temporary CSV file cleaned up');
-                } catch (cleanupError) {
-                    console.error('Error cleaning up CSV file:', cleanupError.message);
+                    fs.writeFileSync(filePath, csvBuffer);
+                    csvMedia = MessageMedia.fromFilePath(filePath);
+                    console.log('CSV downloaded and prepared for distribution');
+                } catch (error) {
+                    console.error('Error downloading CSV after retries:', error.message);
                 }
+                for (const id of targetIds) {
+                    try {
+                        const chat = await client.getChatById(id);
+                        await chat.sendMessage(message);
+                        if (csvMedia) {
+                            await chat.sendMessage(csvMedia, { caption: 'Daily Subscriber Report' });
+                        } else {
+                            await chat.sendMessage('Failed to download the daily subscriber report.');
+                        }
+                    } catch (err) {
+                        console.error(`Failed to send report to ID ${id}:`, err.message);
+                    }
+                }
+                if (csvMedia) {
+                    try {
+                        const today = new Date();
+                        const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
+                        const filePath = path.join(__dirname, fileName);
+                        fs.unlinkSync(filePath);
+                        console.log('Temporary CSV file cleaned up');
+                    } catch (cleanupError) {
+                        console.error('Error cleaning up CSV file:', cleanupError.message);
+                    }
+                }
+            } catch (error) {
+                console.error('Scheduled daily task failed:', error.message);
             }
+        };
 
-        } catch (error) {
-            console.error('Scheduled daily task failed:', error.message);
-        }
-    };
+        cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
-    cron.schedule('59 23 * * *', scheduledTask, {
-        timezone: "Asia/Kolkata"
-    });
+        // ANP Status Check Task
+        cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
-    cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
-           timezone: "Asia/Kolkata"
-    });
+        // Ticket Monitoring Task
+        cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
-    // 1. Check for new tickets every 5 minutes
-    cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
-        timezone: "Asia/Kolkata"
-    });
+        // Finally, start the proactive refresh timer for subsequent runs
+        setInterval(forceRefreshSession, AUTH_LIFETIME);
 
-    console.log('WhatsApp bot ready to use!!');
+        console.log('WhatsApp bot ready to use!!');
+
+    } catch (error) {
+        console.error('The bot may not function correctly until the next successful refresh cycle.', error.message);
+    }
 });
 
 client.on('qr', generateQRCode);
