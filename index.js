@@ -2723,14 +2723,14 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
-    cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
-           timezone: "Asia/Kolkata"
-    });
+   // cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
+    //       timezone: "Asia/Kolkata"
+    // });
 
     // 1. Check for new tickets every 5 minutes
-    cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
-        timezone: "Asia/Kolkata"
-    });
+ //   cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
+   //     timezone: "Asia/Kolkata"
+   // });
 
     console.log('WhatsApp bot ready to use!!');
 });
@@ -2744,5 +2744,6 @@ client.on('message', (message) => {
 
     handleIncomingMessage(message);
 });
+
 
 client.initialize();
