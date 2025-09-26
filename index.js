@@ -105,7 +105,7 @@ const ALLOWED_TICKET_SUBJECTS = new Set([
 // -- Configuration for automated ticket monitoring - target number and cron schedule
 const TICKET_MONITOR_CONFIG = {
     TARGET_ID: '916200493605@c.us',
-    CRON_SCHEDULE: '*/8 * * * *'
+    CRON_SCHEDULE: '*/10 * * * *'
 };
 
 
@@ -437,7 +437,7 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
         }
 
         for (const ticket of ticketsToProcess) {
-            const freshCookiesForDetails = await authenticate('admin', 'Pass@123');
+            const freshCookiesForDetails = sessionCache;
             const ticketDetails = await getTicketDetails(ticket.viewLink, freshCookiesForDetails);
             
             if (ticketDetails) {
@@ -2575,8 +2575,10 @@ const handleIncomingMessage = async (message) => {
     }
 };
 
-client.on('ready', async () => { // The handler is now async
+client.on('ready', async () => {
+
     // --- 1. Initial Data Loading ---
+
     loadProcessedTicketIds();
     loadAnpDownState();
     loadAnpReportState();
@@ -2586,31 +2588,28 @@ client.on('ready', async () => { // The handler is now async
     // --- 2. Define Authentication Refresh Logic ---
     const AUTH_LIFETIME = 282000; // 4 minutes 42 seconds
 
-    // This is the robust version that prevents race conditions
     const forceRefreshSession = async () => {
         try {
-            // Get BOTH fresh sessions into temporary local variables first.
             const freshPortalSession = await authenticate('admin', 'Pass@123');
             const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
-
-            // NOW, update the global cache in one atomic step.
             sessionCache = freshPortalSession;
             nmsSessionCache = freshNmsCookie;
-
-            console.log('Session Optimized!!!');
+            console.log('Bot is healthy.');
         } catch (err) {
-            console.error('[TIMER] Proactive session refresh failed:', err.message);
-            // We throw the error so the initial startup can catch it
-            throw err; 
+            console.error('[TIMER] FAILURE: Proactive session refresh failed:', err.message);
+            sessionCache = null;
+            nmsSessionCache = null;
+            const recoveryDelay = 15000; // 15 seconds
+            console.error(`Scheduling recovery attempt in ${recoveryDelay / 1000} seconds.`);
+            setTimeout(forceRefreshSession, recoveryDelay);
+            throw err;
         }
     };
 
     // --- 3. Perform Initial Authentication and Setup Scheduled Tasks ---
     try {
         await forceRefreshSession();
-        console.log('Bot is Ready, Final checks required..');
-
-        // Daily Subscriber Count and Report Task
+        console.log('Bot is fully operational.');
         const scheduledTask = async () => {
             try {
                 const count = await getSubscriberCount();
@@ -2618,7 +2617,7 @@ client.on('ready', async () => { // The handler is now async
                 const targetIds = ['917004501523@c.us', '916200493605@c.us'];
                 let csvMedia = null;
                 try {
-                    const cookies = sessionCache; // Use the global cache
+                    const cookies = sessionCache;
                     const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
                     const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
                         headers: {
@@ -2668,22 +2667,21 @@ client.on('ready', async () => { // The handler is now async
                 console.error('Scheduled daily task failed:', error.message);
             }
         };
-
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // ANP Status Check Task
-        cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
+        cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
         // Ticket Monitoring Task
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
-        // Finally, start the proactive refresh timer for subsequent runs
+        // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
 
         console.log('WhatsApp bot ready to use!!');
 
     } catch (error) {
-        console.error('The bot may not function correctly until the next successful refresh cycle.', error.message);
+        console.error('CRITICAL: Initial authentication failed. The bot may not function correctly until the first recovery attempt succeeds.', error.message);
     }
 });
 
