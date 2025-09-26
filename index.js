@@ -2612,6 +2612,7 @@ client.on('ready', async () => {
     };
 
     // --- 3. Perform Initial Authentication and Setup Scheduled Tasks ---
+    const initialDelay = 3000; // 3 seconds
     try {
         await forceRefreshSession();
         console.log('Bot is fully operational.');
@@ -2699,5 +2700,6 @@ client.on('message', (message) => {
 
     handleIncomingMessage(message);
 });
+
 
 client.initialize();
