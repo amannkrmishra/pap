@@ -726,8 +726,8 @@ const generateQRCode = (qr) => {
 
 
 const authenticate = async (username, password) => {
-    if (sessionCache && Date.now() - cacheTime < 600000) { // 10 minutes
-        if (nmsSessionCache && Date.now() - nmsCacheTime < 600000) { // 10 minutes
+    if (sessionCache && Date.now() - cacheTime < 360000) { // 6 minutes
+        if (nmsSessionCache && Date.now() - nmsCacheTime < 360000) { // 6 minutes
             return {
                 ...sessionCache,
                 nmsCookie: nmsSessionCache
