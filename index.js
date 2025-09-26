@@ -4,6 +4,7 @@ const {
     MessageMedia
 } = require('whatsapp-web.js');
 
+// -- WhatsApp Web client initialization with Puppeteer headless browser configuration
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -69,6 +70,7 @@ let sessionCache = null;
 let cacheTime = 0;
 const userDataCacheByFile = {};
 const downPartnersState = new Map();
+// -- Configuration object for ANP (Access Network Provider) monitoring - contains service URLs, target numbers, ignored partner IDs
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
     TARGET_ID: '916200493605@c.us',
@@ -82,6 +84,7 @@ const ANP_CONFIG = {
     ])
 };
 
+// -- Set of allowed ticket subjects that the bot will process and alert on
 const ALLOWED_TICKET_SUBJECTS = new Set([
     'slow browsing speed',
     'wireless network issue',
@@ -102,6 +105,7 @@ const ALLOWED_TICKET_SUBJECTS = new Set([
     'subscription type change request'
 ]);
 
+// -- Configuration for automated ticket monitoring - target number and cron schedule
 const TICKET_MONITOR_CONFIG = {
     TARGET_ID: '916200493605@c.us',
     CRON_SCHEDULE: '*/8 * * * *'
@@ -2587,8 +2591,14 @@ const handleIncomingMessage = async (message) => {
 
         if (messageBodyNoSpaces.includes('cafupdate')) {
             await message.reply('eKYC Checking..');
-            const totalProcessed = await processAllForms(message);
-            await message.reply(`Completed: ${totalProcessed}`);
+            try {
+                const cookies = await authenticate('admin', 'Pass@123');
+                const totalProcessed = await processAllForms(cookies, message);
+                await message.reply(`Completed: ${totalProcessed}`);
+            } catch (authError) {
+                console.error('Authentication failed before CAF update:', authError.message);
+                await message.reply('Could not start eKYC process. Authentication failed.');
+            }
         }
     } catch (error) {
         try {
