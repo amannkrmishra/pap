@@ -726,8 +726,8 @@ const generateQRCode = (qr) => {
 
 
 const authenticate = async (username, password) => {
-    if (sessionCache && Date.now() - cacheTime < 360000) { // 6 minutes
-        if (nmsSessionCache && Date.now() - nmsCacheTime < 360000) { // 6 minutes
+    if (sessionCache && Date.now() - cacheTime < 600000) { // 10 minutes
+        if (nmsSessionCache && Date.now() - nmsCacheTime < 600000) { // 10 minutes
             return {
                 ...sessionCache,
                 nmsCookie: nmsSessionCache
@@ -1890,14 +1890,20 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
 
 const processTasks = async (originalMessage) => {
     try {
+        // Get cookies ONCE at the beginning
         const cookies = await authenticate('admin', 'Pass@123');
+        
         const { data } = await axios.get(mainURL, {
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            headers: {
+                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
+            },
             timeout: 15000
         });
+        
         const $ = cheerio.load(data);
         const submitted = [];
         const verified = [];
+        
         $('table tbody tr').each((_, el) => {
             const cells = $(el).find('td');
             const status = $(cells[1]).text().trim().toLowerCase();
@@ -1906,20 +1912,31 @@ const processTasks = async (originalMessage) => {
             if (status === 'submitted' && link) submitted.push({ link, oltabid });
             else if (status === 'verified' && link) verified.push({ link });
         });
+        
         const submittedTasks = submitted;
         const verifiedTasks = verified;
 
-        const results = { submitted: { total: submittedTasks.length, processed: 0 }, verified: { total: verifiedTasks.length, processed: 0 } };
+        const results = { 
+            submitted: { total: submittedTasks.length, processed: 0 }, 
+            verified: { total: verifiedTasks.length, processed: 0 } 
+        };
 
+        // Pass cookies to functions
         for (const { link, oltabid } of submittedTasks) {
-            if (await handleSubmittedForm(link, oltabid, null, originalMessage)) results.submitted.processed++;
+            if (await handleSubmittedForm(link, oltabid, cookies, originalMessage)) {
+                results.submitted.processed++;
+            }
         }
+        
         for (const { link } of verifiedTasks) {
-            if (await handleVerifiedForm(link, originalMessage)) results.verified.processed++;
+            if (await handleVerifiedForm(link, cookies, originalMessage)) {
+                results.verified.processed++;
+            }
         }
+        
         return results;
     } catch (err) {
-        console.error(`Error processing tasks after retries: ${err.message}`);
+        console.error(`Error processing tasks: ${err.message}`);
         return null;
     }
 };
@@ -2014,54 +2031,76 @@ const getUsername = async (firstName, baseUsername, cookies) => {
     return response.UNAME || null;
 };
 
-const createSubscription = async (link, derivedUsername, originalMessage) => {
+const createSubscription = async (link, derivedUsername, cookies, originalMessage) => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
         const hiddenInputs = await getHiddenInputs(link, cookies);
         if (!hiddenInputs.oltabid || !hiddenInputs.pggroupid || !hiddenInputs.pkgid) {
             throw new Error('Required hidden inputs not found');
         }
 
         const { data: formData } = await axios.get(`${baseURL}${link}`, {
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            headers: {
+                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
+            },
             timeout: 9000
         });
         const $ = cheerio.load(formData);
         const existingUsername = ($('input#uname').attr('value') || $('input#dusername_org').attr('value') || '').trim();
 
         let optionsMessage = `Choose username option:\n`;
-        if (existingUsername) optionsMessage += `1. Default Username: ${existingUsername}\n`;
+        if (existingUsername) {
+            optionsMessage += `1. Default Username: ${existingUsername}\n`;
+        }
         optionsMessage += `2. Bot Username: ${derivedUsername}\n`;
         optionsMessage += `3. Input Username manually\n`;
         await originalMessage.reply(optionsMessage);
 
         const userChoice = await waitForReply(originalMessage);
         let finalUsername;
+
         switch (userChoice.body.trim()) {
             case '1':
-                if (existingUsername) finalUsername = existingUsername;
+                if (existingUsername) {
+                    // Properly verify existing username
+                    const verifiedExisting = await getUsername(hiddenInputs.firstname, existingUsername, cookies);
+                    if (verifiedExisting) {
+                        finalUsername = verifiedExisting;
+                    } else {
+                        await originalMessage.reply(`Username "${existingUsername}" is not available.`);
+                        return false;
+                    }
+                }
                 break;
             case '2':
                 finalUsername = derivedUsername;
                 break;
             case '3':
                 await originalMessage.reply("Input Manual Username:");
-                finalUsername = (await waitForReply(originalMessage)).body.trim();
+                const manualUsername = (await waitForReply(originalMessage)).body.trim();
+                const verifiedManual = await getUsername(hiddenInputs.firstname, manualUsername, cookies);
+                if (verifiedManual) {
+                    finalUsername = verifiedManual;
+                } else {
+                    await originalMessage.reply(`Username "${manualUsername}" is not available.`);
+                    return false;
+                }
                 break;
             default:
-                await originalMessage.reply("Invalid option."); return false;
-        }
-        if (!finalUsername) return false;
-        const verifiedUsername = await getUsername(hiddenInputs.firstname, finalUsername, cookies);
-        if (!verifiedUsername) {
-            await originalMessage.reply(`Username "${finalUsername}" is not available.`);
-            return false;
+                await originalMessage.reply("Invalid option.");
+                return false;
         }
 
+        if (!finalUsername) return false;
+
         const payload = new URLSearchParams({
-            oltabid: hiddenInputs.oltabid, uname: verifiedUsername, pggroupid: hiddenInputs.pggroupid,
-            pkgid: hiddenInputs.pkgid, anp: hiddenInputs.anp, vlanid: hiddenInputs.vlanid,
-            caf_type: hiddenInputs.caf_type, railwire_test_name: cookies.railwireCookie.value,
+            oltabid: hiddenInputs.oltabid,
+            uname: finalUsername,
+            pggroupid: hiddenInputs.pggroupid,
+            pkgid: hiddenInputs.pkgid,
+            anp: hiddenInputs.anp,
+            vlanid: hiddenInputs.vlanid,
+            caf_type: hiddenInputs.caf_type,
+            railwire_test_name: cookies.railwireCookie.value,
             mobileno: hiddenInputs.mobileno
         }).toString();
 
@@ -2074,25 +2113,30 @@ const createSubscription = async (link, derivedUsername, originalMessage) => {
         });
 
         if (status === 200) {
-            const userData = await fetchUserDataFromPortal(verifiedUsername);
-            if (userData) await resetPassword(userData);
+            const userData = await fetchUserDataFromPortal(finalUsername);
+            if (userData) {
+                await resetPassword(userData);  // resetPassword will get its own cookies internally
+            }
         }
         return status === 200;
     } catch (err) {
-        console.error(`Error creating subscription after retries: ${err.message}`);
+        console.error(`Error creating subscription: ${err.message}`);
         return false;
     }
 };
 
-const handleVerifiedForm = async (link, originalMessage) => {
+const handleVerifiedForm = async (link, cookies, originalMessage) => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
         const { data } = await axios.get(`${baseURL}${link}`, {
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            headers: {
+                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
+            },
             timeout: 9000
         });
         const $ = cheerio.load(data);
-        const firstName = (await getHiddenInputs(link, cookies)).firstname?.split(' ')[0]?.toLowerCase();
+        
+        const hiddenInputs = await getHiddenInputs(link, cookies);
+        const firstName = hiddenInputs.firstname?.split(' ')[0]?.toLowerCase();
         if (!firstName) throw new Error('First name not found.');
 
         const associatedPartner = $(`.profile-info-name:contains('Associated Partner')`).next().text().trim().toLowerCase();
@@ -2103,9 +2147,9 @@ const handleVerifiedForm = async (link, originalMessage) => {
         const finalUsername = await getUsername(firstName, baseUsername, cookies);
         if (!finalUsername) throw new Error('Failed to derive username.');
 
-        return await createSubscription(link, finalUsername, originalMessage);
+        return await createSubscription(link, finalUsername, cookies, originalMessage);
     } catch (err) {
-        console.error(`Error processing verified form after retries: ${err.message}`);
+        console.error(`Error processing verified form: ${err.message}`);
         return false;
     }
 };
@@ -2159,11 +2203,12 @@ const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
     }
 };
 
-const handleSubmittedForm = async (link, oltabid, username, originalMessage) => {
+const handleSubmittedForm = async (link, oltabid, cookies, originalMessage) => {
     try {
-        const cookies = await authenticate('admin', 'Pass@123');
         const { data } = await axios.get(`${baseURL}${link}`, {
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            headers: {
+                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`
+            },
             timeout: 8000
         });
         const $ = cheerio.load(data);
@@ -2174,7 +2219,12 @@ const handleSubmittedForm = async (link, oltabid, username, originalMessage) => 
 
         if (addressProof === 'file not exists') {
             console.log('Marking as verified because file not exists.');
-            const payload = new URLSearchParams({ oltabid, mobileno_dual: mobileNo, railwire_test_name: cookies.railwireCookie.value }).toString();
+            const payload = new URLSearchParams({
+                oltabid,
+                mobileno_dual: mobileNo,
+                railwire_test_name: cookies.railwireCookie.value
+            }).toString();
+            
             await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
                 headers: {
                     Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
@@ -2203,7 +2253,12 @@ const handleSubmittedForm = async (link, oltabid, username, originalMessage) => 
             const userInput = (await waitForReply(originalMessage)).body.toLowerCase();
 
             if (userInput.startsWith('y')) {
-                const payload = new URLSearchParams({ oltabid, mobileno_dual: mobileNo, railwire_test_name: cookies.railwireCookie.value }).toString();
+                const payload = new URLSearchParams({
+                    oltabid,
+                    mobileno_dual: mobileNo,
+                    railwire_test_name: cookies.railwireCookie.value
+                }).toString();
+                
                 await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, {
                     headers: {
                         Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
@@ -2218,7 +2273,7 @@ const handleSubmittedForm = async (link, oltabid, username, originalMessage) => 
             }
         }
     } catch (err) {
-        console.error(`Error processing submitted form for ${username} after retries: ${err.message}`);
+        console.error(`Error processing submitted form: ${err.message}`);
         return false;
     }
 };
@@ -2655,6 +2710,4 @@ client.on('message', (message) => {
     handleIncomingMessage(message);
 });
 
-
 client.initialize();
-
