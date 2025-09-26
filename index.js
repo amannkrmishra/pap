@@ -740,64 +740,41 @@ const generateQRCode = (qr) => {
 
 
 const authenticate = async (username, password) => {
-    // 1. Use fresh cache if available (fastest path).
-    if (sessionCache && Date.now() - cacheTime < 282000) { // 4 minute 42 sec.
-        if (nmsSessionCache && Date.now() - nmsCacheTime < 282000) { // 4 minute 42 sec.
-            return { ...sessionCache, nmsCookie: nmsSessionCache };
-        }
-        try {
-            const nmsCookie = await getNmsSessionFromPortal(sessionCache);
-            nmsSessionCache = nmsCookie;
-            nmsCacheTime = Date.now();
-            return { ...sessionCache, nmsCookie: nmsCookie };
-        } catch (error) {
-            return sessionCache;
-        }
-    }
-
-    // 2. If cache is stale or missing, try the fast refresh first, then fallback.
-    try {
-        // If there's no old session, this will fail and jump straight to the full login.
-        if (!sessionCache?.ciSessionCookie?.value) throw new Error("No session to refresh.");
-
-        console.log('Session stale. Attempting fast refresh...');
-        const response = await axios.get(`${baseURL}/billcntl`, {
-            headers: { 'Cookie': `ci_session=${sessionCache.ciSessionCookie.value}` },
-            maxRedirects: 0,
-            validateStatus: status => status === 200,
-            timeout: 10000
-        });
-
-        const setCookieHeader = response.headers['set-cookie'];
-        const newCiSession = setCookieHeader?.find(c => c.startsWith('ci_session=')).split(';')[0].split('=')[1];
-        const newRailwireCookie = setCookieHeader?.find(c => c.startsWith('railwire_cookie_name=')).split(';')[0].split('=')[1];
-
-        if (!newCiSession || !newRailwireCookie) throw new Error("Refresh failed to return required cookies.");
-
-        // Success! Update cache and time.
-        sessionCache = {
-            railwireCookie: { name: 'railwire_cookie_name', value: newRailwireCookie },
-            ciSessionCookie: { name: 'ci_session', value: newCiSession }
+    if (sessionCache && Date.now() - cacheTime < 282000) { // 4 minutes 42 seconds
+    if (nmsSessionCache && Date.now() - nmsCacheTime < 282000) { // 4 minutes 42 seconds
+        return {
+            ...sessionCache,
+            nmsCookie: nmsSessionCache
         };
-        cacheTime = Date.now();
-        console.log('✅ Session refreshed successfully.');
-
-    } catch (error) {
-        // If refresh fails for any reason, perform the full CAPTCHA login as a fallback.
-        console.warn(`Refresh failed: ${error.message}. Performing full login.`);
-        sessionCache = await originalAuthenticate(username, password);
-        cacheTime = Date.now();
     }
-
-    // 3. Get NMS session after ANY successful portal auth (refresh or full).
     try {
         const nmsCookie = await getNmsSessionFromPortal(sessionCache);
         nmsSessionCache = nmsCookie;
         nmsCacheTime = Date.now();
-        return { ...sessionCache, nmsCookie: nmsCookie };
+        return {
+            ...sessionCache,
+            nmsCookie: nmsCookie
+        };
+    } catch (error) {
+        console.log('Failed to get NMS session cache');
+        }
+    }
+    const portalSession = await originalAuthenticate(username, password);
+    sessionCache = portalSession;
+    cacheTime = Date.now();
+
+    try {
+        const nmsCookie = await getNmsSessionFromPortal(portalSession);
+        nmsSessionCache = nmsCookie;
+        nmsCacheTime = Date.now();
+        
+        return {
+            ...portalSession,
+            nmsCookie: nmsCookie
+        };
     } catch (error) {
         console.error('Failed to get NMS session:', error.message);
-        return sessionCache; // Return portal session even if NMS fails
+        return portalSession;
     }
 };
 
@@ -2723,14 +2700,14 @@ client.on('ready', () => {
         timezone: "Asia/Kolkata"
     });
 
-   // cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
-    //       timezone: "Asia/Kolkata"
-    // });
+    cron.schedule('*/5 * * * *', runAnpStatusCheckAndNotify, {
+           timezone: "Asia/Kolkata"
+    });
 
     // 1. Check for new tickets every 5 minutes
- //   cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
-   //     timezone: "Asia/Kolkata"
-   // });
+    cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, {
+        timezone: "Asia/Kolkata"
+    });
 
     console.log('WhatsApp bot ready to use!!');
 });
@@ -2744,6 +2721,5 @@ client.on('message', (message) => {
 
     handleIncomingMessage(message);
 });
-
 
 client.initialize();
