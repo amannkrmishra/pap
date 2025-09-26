@@ -59,6 +59,7 @@ let partnerMappings = null;
 let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
+let nmsSessionCache = null;
 let lastStillDownReportTime = 0;
 const PROCESSED_TICKETS_FILE_PATH = path.join(__dirname, 'processedTicketIds.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
@@ -2257,9 +2258,13 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
     const timeStamp = startTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     console.log(`\nTriggered by: ${triggeredBy} | Time: ${timeStamp}`);
 
+    if (!sessionCache || !nmsSessionCache) {
+        console.error('ANP Check failed: Authentication session is not available.');
+        return;
+    }
     try {
-        const authData = await authenticate('admin', 'Pass@123');
-        
+        const authData = { ...sessionCache, nmsCookie: nmsSessionCache };
+
         if (!authData.nmsCookie) {
             throw new Error('Could not obtain NMS session');
         }
