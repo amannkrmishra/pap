@@ -61,10 +61,10 @@ let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let nmsSessionCache = null;
 let lastStillDownReportTime = 0;
-const PROCESSED_TICKETS_FILE_PATH = path.join(__dirname, 'processedTicketIds.json');
+const PROCESSED_TICKETS_STATE_FILE_PATH = path.join(__dirname, 'processedTicketsState.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
 const ANP_REPORT_STATE_FILE_PATH = path.join(__dirname, 'anpReportState.json');
-let processedTicketIds = new Set();
+let processedTicketsState = {};
 let sessionCache = null;
 const userDataCacheByFile = {};
 const downPartnersState = new Map();
@@ -135,27 +135,30 @@ const sendAnpAlert = async (message, partnerDetails = null) => {
 
 // -- Helper Functions Start --
 
-// -- Saves processed ticket IDs to JSON file to prevent duplicate alerts
-const saveProcessedTicketIds = () => {
+// -- Saves processed ticket state (including message count) to JSON
+const saveProcessedTicketsState = () => {
     try {
-        const data = JSON.stringify(Array.from(processedTicketIds));
-        fs.writeFileSync(PROCESSED_TICKETS_FILE_PATH, data, 'utf8');
+        const data = JSON.stringify(processedTicketsState, null, 2); // Using JSON object now
+        fs.writeFileSync(PROCESSED_TICKETS_STATE_FILE_PATH, data, 'utf8');
     } catch (error) {
-        console.error('Error saving processed ticket IDs:', error.message);
+        console.error('Error saving processed tickets state:', error.message);
     }
 };
 
 
-// -- Loads previously processed ticket IDs from JSON file on bot startup
-const loadProcessedTicketIds = () => {
+// -- Loads previously processed ticket state from JSON on bot startup
+const loadProcessedTicketsState = () => {
     try {
-        if (fs.existsSync(PROCESSED_TICKETS_FILE_PATH)) {
-            const data = fs.readFileSync(PROCESSED_TICKETS_FILE_PATH, 'utf8');
-            processedTicketIds = new Set(JSON.parse(data));
-            console.log(`Loaded ${processedTicketIds.size} processed ticket IDs from file.`);
+        if (fs.existsSync(PROCESSED_TICKETS_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(PROCESSED_TICKETS_STATE_FILE_PATH, 'utf8');
+            processedTicketsState = JSON.parse(data);
+            console.log(`Loaded state for ${Object.keys(processedTicketsState).length} processed tickets from file.`);
+        } else {
+            processedTicketsState = {}; // Initialize if file doesn't exist
         }
     } catch (error) {
-        console.error('Error loading processed ticket IDs:', error.message);
+        console.error('Error loading processed tickets state:', error.message);
+        processedTicketsState = {}; // Reset on error
     }
 };
 
@@ -313,6 +316,48 @@ const sendTicketAlert = async (message) => {
     }
 };
 
+const replyToTicket = async (ticketId, content) => {
+    try {
+        const cookies = sessionCache;
+        if (!cookies) throw new Error('No active session.');
+
+        const form = new FormData();
+        form.append('railwire_test_name', cookies.railwireCookie.value);
+        form.append('ticketid', ticketId);
+        form.append('content', content);
+
+        const response = await axios.post('https://jh.railwire.co.in/crmcntl/bill_tickreply', form, {
+            headers: {
+                ...form.getHeaders(),
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        });
+
+        return response.status === 200;
+    } catch (error) {
+        console.error(`Error replying to ticket #${ticketId}:`, error.message);
+        return false;
+    }
+};
+
+const handleTicketReply = async (message, ticketId, replyContent) => {
+    const chat = await message.getChat();
+    const success = await replyToTicket(ticketId, replyContent);
+
+    if (success) {
+        // Fetch and show the updated ticket to confirm
+        const ticketViewUrl = `/crmcntl/billticketview/${ticketId}/0`;
+        const updatedDetails = await getTicketDetails(ticketViewUrl, sessionCache);
+        if (updatedDetails) {
+            await chat.sendMessage(`✅ Reply sent! Here is the updated ticket:\n\n${formatTicketMessage(updatedDetails)}`);
+        } else {
+            await chat.sendMessage(`✅ Reply sent, but couldn't fetch the update.`);
+        }
+    } else {
+        await chat.sendMessage(`❌ Failed to send reply to ticket #${ticketId}.`);
+    }
+};
+
 const toTitleCase = (str) => {
     if (!str) return '';
     return str.trim()
@@ -412,20 +457,21 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     return details;
 };
 
+
 const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     try {
         const cookies = sessionCache;
-        const client = axios.create({
+        const apiClient = axios.create({
             baseURL: 'https://jh.railwire.co.in',
             headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
         });
 
         const pageOffsets = ['', '30', '60', '90'];
-        const tickets = [];
+        const ticketsToCheck = [];
 
         for (const offset of pageOffsets) {
             const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
-            const response = await client.get(url);
+            const response = await apiClient.get(url);
             const $ = cheerio.load(response.data);
 
             $('table#results tbody tr').each((i, row) => {
@@ -434,36 +480,56 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
                 const subject = $(cells[4]).text().trim().toLowerCase();
 
                 if (!ALLOWED_TICKET_SUBJECTS.has(subject)) {
-                    return; // Skip if subject is not in the allowed list
+                    return; // Skip non-allowed subjects
                 }
                 
+                // We now check ALL 'open' or 'progress' tickets, not just new ones
                 if (status === 'open' || status === 'progress') {
                     const ticketId = $(cells[0]).contents().first().text().trim();
                     const viewLink = $(cells[cells.length - 1]).find('a').attr('href');
-
-                    if (ticketId && viewLink && !processedTicketIds.has(ticketId)) {
-                        tickets.push({ ticketId, viewLink });
+                    if (ticketId && viewLink) {
+                        ticketsToCheck.push({ ticketId, viewLink });
                     }
                 }
             });
         }
-        const ticketsToProcess = tickets;
 
-        if (ticketsToProcess.length === 0) {
-            console.log('No new "Open" or "Progress" tickets found for allowed subjects.');
+        if (ticketsToCheck.length === 0) {
+            console.log('No "Open" or "Progress" tickets found for allowed subjects.');
             return;
         }
 
-        for (const ticket of ticketsToProcess) {
-            const freshCookiesForDetails = sessionCache;
-            const ticketDetails = await getTicketDetails(ticket.viewLink, freshCookiesForDetails);
+        let changesFound = false;
+        for (const ticket of ticketsToCheck) {
+            const ticketDetails = await getTicketDetails(ticket.viewLink, cookies);
             
             if (ticketDetails) {
-                const formattedMessage = formatTicketMessage(ticketDetails);
-                await sendTicketAlert(formattedMessage);
-                processedTicketIds.add(ticket.ticketId);
-                saveProcessedTicketIds(); // Save state after processing
+                const currentMessageCount = ticketDetails.messages.length;
+                const lastKnownState = processedTicketsState[ticket.ticketId];
+
+                // SCENARIO 1: Brand new ticket
+                if (!lastKnownState) {
+                    console.log(`New ticket found: #${ticket.ticketId}`);
+                    changesFound = true;
+                    const formattedMessage = formatTicketMessage(ticketDetails);
+                    await sendTicketAlert(formattedMessage);
+                    processedTicketsState[ticket.ticketId] = { messageCount: currentMessageCount };
+                    saveProcessedTicketsState(); // Save state immediately
+                } 
+                // SCENARIO 2: Existing ticket has a new reply
+                else if (lastKnownState.messageCount < currentMessageCount) {
+                    console.log(`Update found for ticket #${ticket.ticketId} (New message)`);
+                    changesFound = true;
+                    const formattedMessage = formatTicketMessage(ticketDetails);
+                    await sendTicketAlert(formattedMessage);
+                    processedTicketsState[ticket.ticketId].messageCount = currentMessageCount;
+                    saveProcessedTicketsState(); // Save updated state
+                }
             }
+        }
+
+        if (!changesFound) {
+            console.log(`Checked ${ticketsToCheck.length} active tickets. No new messages or tickets found.`);
         }
     } catch (error) {
         console.error('Error during ticket monitoring:', error.message);
@@ -2456,6 +2522,14 @@ const handleIncomingMessage = async (message) => {
         console.log(`User Detail: ${userIdentifier}`);
         console.log(`Message: ${rawBody}`);
 
+        const replyMatch = rawBody.match(/^@(\d{7,})\s+(.+)/s);
+        if (replyMatch) {
+            const ticketId = replyMatch[1];
+            const replyContent = replyMatch[2];
+            await handleTicketReply(message, ticketId, replyContent);
+            return; // Important: stops the rest of the function
+        }
+
         const SESSION_TIMEOUT_MS = 300000;
         const EXECUTION_DELAY_MS = 1300;
 
@@ -2620,7 +2694,7 @@ client.on('ready', async () => {
 
     // --- 1. Initial Data Loading ---
 
-    loadProcessedTicketIds();
+    loadProcessedTicketsState(); 
     loadAnpDownState();
     loadAnpReportState();
     loadAllData();
@@ -2657,9 +2731,9 @@ client.on('ready', async () => {
             try {
                 const count = await getSubscriberCount();
             //    const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
-                const greeting = new Date().getHours() < 12 ? 'Good morning! Here is the first report of the day.' : 'Final count and report for the day.';
+                const greeting = new Date().getHours() < 12 ? 'Morning report of the day.' : 'Final count and report for the day.';
                 const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\n${greeting}`;
-                const targetIds = ['916200493605@c.us']; // 917004501523@c.us
+                const targetIds = ['917004501523@c.us', '916200493605@c.us'];
                 let csvMedia = null;
                 try {
                     const cookies = sessionCache;
@@ -2714,7 +2788,6 @@ client.on('ready', async () => {
         };
 
         cron.schedule('0 9 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
-        cron.schedule('2 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // ANP Status Check Task
