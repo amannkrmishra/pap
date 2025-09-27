@@ -69,6 +69,7 @@ let sessionCache = null;
 const userDataCacheByFile = {};
 const downPartnersState = new Map();
 // -- Configuration object for ANP (Access Network Provider) monitoring - contains service URLs, target numbers, ignored partner IDs
+// In ANP_CONFIG, add these two new properties:
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
     TARGET_ID: '916200493605@c.us',
@@ -79,7 +80,15 @@ const ANP_CONFIG = {
         '8878892435', '6834570680', '6195650370', '6933249503', '5950839426',
         '5570382470', '2005592154', '3423963007', '1163822769', '1840251248',
         '4352542809', '2090233061', '6096321831', '2692518024',
+    ]),
+    // --- ADD THESE TWO LINES ---
+    AMAN_TARGET_ID: '916200493605@c.us',
+    AMAN_DISTRICTS: new Set([
+        'Pashchimi Singhbhum',
+        'Saraikela-Kharsawan',
+        'Purbi Singhbhum'
     ])
+    // -------------------------
 };
 
 // -- Set of allowed ticket subjects that the bot will process and alert on
@@ -110,10 +119,18 @@ const TICKET_MONITOR_CONFIG = {
 };
 
 
-const sendAnpAlert = async (message) => {
-    const chats = await client.getChats();
-    const group = chats.find(chat => chat.isGroup && chat.name === ANP_CONFIG.GROUP_NAME);
-    if (group) await group.sendMessage(message);
+const sendAnpAlert = async (message, partnerDetails = null) => {
+    if (!partnerDetails) {
+        return;
+    }
+    const district = partnerDetails['District'];
+    if (district && ANP_CONFIG.AMAN_DISTRICTS.has(district)) {
+        try {
+            await client.sendMessage(ANP_CONFIG.AMAN_TARGET_ID, message);
+        } catch (error) {
+            console.error(`Failed to send ANP alert to Aman: ${error.message}`);
+        }
+    }
 };
 
 // -- Helper Functions Start --
@@ -197,12 +214,12 @@ const loadAnpReportState = () => {
 // -- Generates random email address based on username for bulk updates
 const generateRandomEmail = (username) => {
     if (!username || typeof username !== 'string') {
-        return `random${Date.now()}@gmail.com`;
+        return `random${Date.now()}@gmaill.com`;
     }
     const parts = username.split('.');
     const namePart = parts[parts.length - 1];
     const randomNum = Math.floor(1000 + Math.random() * 9000);
-    return `${namePart}${randomNum}@gmail.com`.toLowerCase();
+    return `${namePart}${randomNum}@gmaill.com`.toLowerCase();
 };
 
 // -- Masks subscriber names by replacing characters with 'x' for privacy
@@ -718,7 +735,7 @@ const handleBulkSubscriberUpdate = async (message) => {
             console.error(`Error during bulk update for ${userCode} after retries:`, error.message);
             await chat.sendMessage(`An error occurred while processing *${userCode}*.`);
         }
-        await new Promise(resolve => setTimeout(resolve, 150));
+        await new Promise(resolve => setTimeout(resolve, 10));
     }
     userSessions.delete(userIdentifier);
     await chat.sendMessage("Bulk update process finished.");
@@ -2300,29 +2317,42 @@ const runAnpStatusCheckAndNotify = async (isRetry = false, triggeredBy = 'cron')
             }
         }
 
-        const newAlerts = [], stillDownAlerts = [];
+        const newAlerts = [];
+        const amansStillDownPartners = []; // Use a new list for the filtered report
         const reportable = [...currentProblemPartners.values()].filter(p => !ANP_CONFIG.IGNORED_PARTNER_IDS.has(p.id));
 
         for (const p of reportable) {
             if (downPartnersState.has(p.id)) {
-                stillDownAlerts.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs}) is still down.`);
+                // This is a "still down" partner. Check its district.
+                const details = extraDetails[p.id] || {};
+                const district = details['District'];
+                if (district && ANP_CONFIG.AMAN_DISTRICTS.has(district)) {
+                    amansStillDownPartners.push(`- *${p.name}* (Subs: ${p.live_subs} / ${p.total_subs})`);
+                }
             } else {
+                // This is a new partner going down
                 downPartnersState.set(p.id, { firstSeen: Date.now(), details: p });
-                saveAnpDownState(); // Save state after a new partner goes down
+                saveAnpDownState();
                 newAlerts.push(p);
             }
         }
 
         if (recoveredPartners.length > 0) {
-            let msg = `*Detected: Partner-Link Up 🎉*\n`;
-            recoveredPartners.forEach(p => { msg += `\n✅ *${p.name}*`; });
-            await sendAnpAlert(msg);
+            for (const recoveredPartner of recoveredPartners) {
+                const details = extraDetails[recoveredPartner.id] || {};
+                const upMessage = `*Detected: Partner-Link Up 🎉*\n\n✅ *${recoveredPartner.name}*`;
+                await sendAnpAlert(upMessage, details);
+            }
         }
         
-        if (stillDownAlerts.length > 0) {
+        if (amansStillDownPartners.length > 0) {
             const NINETY_MINUTES_MS = 90 * 60 * 1000;
             if (Date.now() - lastStillDownReportTime >= NINETY_MINUTES_MS) {
-                await sendAnpAlert(`*Still ANPs Down Report! ➕*\n\n${stillDownAlerts.join('\n')}`);
+                // Build the custom message and send it directly to Aman
+                let summaryMessage = "*Aman's Still down ANPs :*\n\n";
+                summaryMessage += amansStillDownPartners.join('\n');
+                await client.sendMessage(ANP_CONFIG.AMAN_TARGET_ID, summaryMessage);
+                
                 lastStillDownReportTime = Date.now();
                 saveAnpReportState();
             }
