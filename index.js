@@ -2656,8 +2656,10 @@ client.on('ready', async () => {
         const scheduledTask = async () => {
             try {
                 const count = await getSubscriberCount();
-                const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
-                const targetIds = ['917004501523@c.us', '916200493605@c.us'];
+            //    const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
+                const greeting = new Date().getHours() < 12 ? 'Good morning! Here is the first report of the day.' : 'Final count and report for the day.';
+                const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\n${greeting}`;
+                const targetIds = ['916200493605@c.us']; // 917004501523@c.us
                 let csvMedia = null;
                 try {
                     const cookies = sessionCache;
@@ -2710,6 +2712,9 @@ client.on('ready', async () => {
                 console.error('Scheduled daily task failed:', error.message);
             }
         };
+
+        cron.schedule('0 9 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+        cron.schedule('2 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // ANP Status Check Task
