@@ -91,12 +91,6 @@ const ANP_CONFIG = {
     // -------------------------
 };
 
-const ALLOWED_TICKET_CLUSTERS = new Set([
-    'purbi singhbhum',
-    'saraikela-kharsawan',
-    'pashchimi singhbhum'
-]);
-
 // -- Set of allowed ticket subjects that the bot will process and alert on
 const ALLOWED_TICKET_SUBJECTS = new Set([
     'slow browsing speed',
@@ -464,7 +458,7 @@ const getTicketDetails = async (ticketUrl, cookies) => {
 };
 
 
-const monitorAndAlertTickets = async (triggeredBy = 'cron', applyFilter = true) => {
+const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     try {
         const cookies = sessionCache;
         const apiClient = axios.create({
@@ -510,12 +504,8 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron', applyFilter = true) 
             const ticketDetails = await getTicketDetails(ticket.viewLink, cookies);
             
             if (ticketDetails) {
-                    const cluster = (ticketDetails.cluster || '').toLowerCase();
-                    if (applyFilter && !ALLOWED_TICKET_CLUSTERS.has(cluster)) {
-                    continue; // If filter is on and cluster doesn't match, skip to the next ticket
-                    }
-                    const currentMessageCount = ticketDetails.messages.length;
-                    const lastKnownState = processedTicketsState[ticket.ticketId];
+                const currentMessageCount = ticketDetails.messages.length;
+                const lastKnownState = processedTicketsState[ticket.ticketId];
 
                 // SCENARIO 1: Brand new ticket
                 if (!lastKnownState) {
@@ -2644,16 +2634,11 @@ const handleIncomingMessage = async (message) => {
             return;
         }
 
-        if (messageBodyNoSpaces.includes('generaltickets')) {
-        await message.reply('Checking for *all* General Tickets...');
-        await monitorAndAlertTickets('manual', false); // `false` disables the filter
-        await message.reply('General Ticket Check complete.');
-        return;
-        } else if (messageBodyNoSpaces.includes('checktickets')) {
-        await message.reply('Checking for Tickets in your Clusters...');
-        await monitorAndAlertTickets('manual', true); // `true` enables the filter
-        await message.reply('Your ticket check complete.');
-        return;
+        if (messageBodyNoSpaces.includes('checktickets')) {
+            await message.reply('Manually checking for Tickets...');
+            await monitorAndAlertTickets('manual');
+            await message.reply('Ticket check complete.');
+            return;
         }
 
         if (messageBodyNoSpaces.includes('subschange')) {
@@ -2833,4 +2818,3 @@ client.on('message', (message) => {
 
 
 client.initialize();
-
