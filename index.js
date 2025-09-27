@@ -60,7 +60,6 @@ let partnerIndex = null;
 let subscriberDataCache = null;
 let partnerLiveDetailsCache = null;
 let nmsSessionCache = null;
-let botStartTime = null;
 let lastStillDownReportTime = 0;
 const PROCESSED_TICKETS_FILE_PATH = path.join(__dirname, 'processedTicketIds.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
@@ -79,23 +78,9 @@ const ANP_CONFIG = {
         '3474487439', '5283639869', '2568065682', '2425852224', '6378518993',
         '8878892435', '6834570680', '6195650370', '6933249503', '5950839426',
         '5570382470', '2005592154', '3423963007', '1163822769', '1840251248',
-        '4352542809', '2090233061', '6096321831',
+        '4352542809', '2090233061', '6096321831', '2692518024',
     ])
 };
-
-setInterval(() => {
-    const now = Date.now();
-    const STALE_SESSION_TIMEOUT = 3600000; // 1 hour
-    
-    for (const [userIdentifier, session] of userSessions.entries()) {
-        if (session.lastUpdated && (now - session.lastUpdated) > STALE_SESSION_TIMEOUT) {
-            if (session.executionTimeoutId) clearTimeout(session.executionTimeoutId);
-            if (session.abandonmentTimeoutId) clearTimeout(session.abandonmentTimeoutId);
-            userSessions.delete(userIdentifier);
-            console.log(`Cleaned up stale session for ${userIdentifier}`);
-        }
-    }
-}, 300000); // Run cleanup every 5 minutes
 
 // -- Set of allowed ticket subjects that the bot will process and alert on
 const ALLOWED_TICKET_SUBJECTS = new Set([
@@ -262,18 +247,11 @@ const createHeaderMap = (header) => header.reduce((acc, col, index) => {
 // -- Uses Tesseract OCR to extract usernames/IDs from uploaded images
 const extractUsernamesFromImage = async (message) => {
     if (!message.hasMedia) return [];
-    
-    try {
-        const media = await message.downloadMedia();
-        if (!media || !media.mimetype.startsWith('image/')) return [];
+    const media = await message.downloadMedia();
+    if (!media || !media.mimetype.startsWith('image/')) return [];
 
+    try {
         const imageBuffer = Buffer.from(media.data, 'base64');
-        
-        // Validate image size (10MB limit)
-        if (imageBuffer.length > 10 * 1024 * 1024) {
-            console.warn('Image too large for OCR processing');
-            return [];
-        }
 
         const processedImageBuffer = await sharp(imageBuffer)
             .greyscale()
@@ -283,14 +261,7 @@ const extractUsernamesFromImage = async (message) => {
 
         const { data: { text } } = await Tesseract.recognize(
             processedImageBuffer,
-            'eng',
-            {
-                logger: m => {
-                    if (m.status === 'recognizing text') {
-                        console.log(`OCR Progress: ${Math.round(m.progress * 100)}%`);
-                    }
-                }
-            }
+            'eng'
         );
 
         const subscriberIdPattern = /\b\d{5}\b/g;
@@ -311,7 +282,6 @@ const extractUsernamesFromImage = async (message) => {
         return [...new Set(matches.map(m => m.toLowerCase()))];
 
     } catch (error) {
-        console.error('OCR processing failed:', error.message);
         return [];
     }
 };
@@ -498,30 +468,16 @@ const loadAllData = async () => {
 };
 
 const loadUserDataFromExcel = async (filename = 'PortalUsers.xlsx') => {
-    const cacheKey = filename;
-    const CACHE_EXPIRY = 300000; // 5 minutes
-    
-    if (userDataCacheByFile[cacheKey] && 
-        userDataCacheByFile[cacheKey].lastUpdated && 
-        (Date.now() - userDataCacheByFile[cacheKey].lastUpdated) < CACHE_EXPIRY) {
-        return userDataCacheByFile[cacheKey].data;
-    }
+    if (userDataCacheByFile[filename]) return userDataCacheByFile[filename];
 
     try {
         const filePath = path.resolve(__dirname, filename);
-        if (!fs.existsSync(filePath)) {
-            console.warn(`Excel file ${filename} not found`);
-            return new Map();
-        }
-
         const rows = await readXlsxFile(filePath);
-        if (!rows || rows.length < 2) {
-            console.warn(`Excel file ${filename} is empty or invalid`);
-            return new Map();
-        }
+        if (!rows || rows.length < 2) return new Map();
 
         const [header, ...data] = rows;
         const headerMap = createHeaderMap(header);
+
 
         const idxUsername = headerMap['Username'];
         const idxName = headerMap['Name'];
@@ -529,22 +485,15 @@ const loadUserDataFromExcel = async (filename = 'PortalUsers.xlsx') => {
         const idxSubscriberId = headerMap['SubscriberId'];
         const idxEmail = headerMap['Email'];
 
-        if (idxUsername === undefined || idxSubscriberId === undefined) {
-            throw new Error('Required columns (Username, SubscriberId) not found in Excel file');
-        }
-
         const userDataCache = new Map();
 
-        for (const row of data) {
-            if (!row || row.length === 0) continue;
-            
+        for (let i = 0, len = data.length; i < len; i++) {
+            const row = data[i];
             const username = normalize(row[idxUsername]);
-            const name = row[idxName] ? String(row[idxName]).trim() : '';
-            const mobileNo = row[idxMobileNo] ? normalize(row[idxMobileNo]) : '';
-            const subscriberId = row[idxSubscriberId] ? normalize(row[idxSubscriberId]) : '';
-            const email = row[idxEmail] ? normalize(row[idxEmail]) : '';
-
-            if (!username && !subscriberId) continue;
+            const name = normalize(row[idxName]);
+            const mobileNo = normalize(row[idxMobileNo]);
+            const subscriberId = normalize(row[idxSubscriberId]);
+            const email = normalize(row[idxEmail]);
 
             const userData = {
                 MobileNo: mobileNo,
@@ -555,21 +504,13 @@ const loadUserDataFromExcel = async (filename = 'PortalUsers.xlsx') => {
             };
 
             if (username) userDataCache.set(username, userData);
-            if (subscriberId && subscriberId !== username) {
-                userDataCache.set(subscriberId, userData);
-            }
+            if (subscriberId) userDataCache.set(subscriberId, userData);
         }
 
-        userDataCacheByFile[cacheKey] = {
-            data: userDataCache,
-            lastUpdated: Date.now()
-        };
-
-        console.log(`Loaded ${userDataCache.size} entries from ${filename}`);
+        userDataCacheByFile[filename] = userDataCache;
         return userDataCache;
-
     } catch (err) {
-        console.error(`Error loading user data from Excel ${filename}:`, err.message);
+        console.error(`Error loading user data from Excel: ${err.message}`);
         return new Map();
     }
 };
@@ -734,76 +675,53 @@ const handleBulkSubscriberUpdate = async (message) => {
         await chat.sendMessage("No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
         return;
     }
-
-    // Check if already processing
-    if (session.isProcessing) {
-        await chat.sendMessage("Bulk update already in progress. Please wait...");
-        return;
-    }
-
-    // Mark as processing
-    session.isProcessing = true;
-    userSessions.set(userIdentifier, session);
-
     const { userCodes } = session;
 
-    try {
-        const processBatch = async (codes) => {
-            return Promise.all(codes.map(async (userCode) => {
-                try {
-                    const userData = await fetchUserDataFromPortal(userCode);
-                    if (!userData || !userData.SubscriberId || !userData.Username) {
-                        await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
-                        return;
-                    }
+    for (const userCode of userCodes) {
+        try {
+            const userData = await fetchUserDataFromPortal(userCode);
+            if (!userData || !userData.SubscriberId || !userData.Username) {
+                await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
+                continue;
+            }
 
-                    const newPhoneNumber = generateRandomMobile();
-                    const newEmail = generateRandomEmail(userData.Username);
+            const newPhoneNumber = generateRandomMobile();
+            const newEmail = generateRandomEmail(userData.Username);
 
-                    const cookies = sessionCache;
-                    const payload = new URLSearchParams({
-                        'cnumber': newPhoneNumber,
-                        'cemail': newEmail,
-                        'id': userData.SubscriberId,
-                        'railwire_test_name': cookies.railwireCookie.value
-                    });
-                    const config = {
-                        headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                        }
-                    };
-                    const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
-                    const responseData = response.data;
-
-                    if (responseData && responseData.STATUS === "OK") {
-                        let reply = `*Username:* ${userData.Username}\n`;
-                        reply += `*Mobile No.:* ${newPhoneNumber}\n`;
-                        reply += `*Email ID:* ${newEmail}\n\n`;
-                        reply += `Details have been updated successfully.`;
-                        await chat.sendMessage(reply);
-                    } else {
-                        const serverStatus = responseData ? responseData.STATUS : "No response";
-                        await chat.sendMessage(`Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
-                    }
-                } catch (error) {
-                    console.error(`Error during bulk update for ${userCode} after retries:`, error.message);
-                    await chat.sendMessage(`An error occurred while processing *${userCode}*.`);
+            const cookies = sessionCache;
+            const payload = new URLSearchParams({
+                'cnumber': newPhoneNumber,
+                'cemail': newEmail,
+                'id': userData.SubscriberId,
+                'railwire_test_name': cookies.railwireCookie.value
+            });
+            const config = {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
                 }
-            }));
-        };
+            };
+            const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+            const responseData = response.data;
 
-        for (let i = 0; i < userCodes.length; i += 3) {
-            await processBatch(userCodes.slice(i, i + 3));
-            await new Promise(resolve => setTimeout(resolve, 200));
+            if (responseData && responseData.STATUS === "OK") {
+            let reply = `*Username:* ${userData.Username}\n`;
+                reply += `*Mobile No.:* ${newPhoneNumber}\n`;
+                reply += `*Email ID:* ${newEmail}\n\n`;
+                reply += `Details have been updated successfully.`;
+                await chat.sendMessage(reply);
+            } else {
+                const serverStatus = responseData ? responseData.STATUS : "No response";
+                await chat.sendMessage(`Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
+            }
+        } catch (error) {
+            console.error(`Error during bulk update for ${userCode} after retries:`, error.message);
+            await chat.sendMessage(`An error occurred while processing *${userCode}*.`);
         }
-        
-        await chat.sendMessage("Bulk update process finished.");
-
-    } finally {
-        // Remove processing flag and session
-        userSessions.delete(userIdentifier);
+        await new Promise(resolve => setTimeout(resolve, 150));
     }
+    userSessions.delete(userIdentifier);
+    await chat.sendMessage("Bulk update process finished.");
 };
 
 
@@ -1021,7 +939,7 @@ async function fetchUserDataFromPortal(userCode) {
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         const payload = new URLSearchParams({
             'railwire_test_name': cookies.railwireCookie.value,
-            'user-search': userCode.trim()
+            'user-search': userCode
         });
 
         const searchResponse = await axios.post(
@@ -1889,7 +1807,7 @@ async function ChangePlan(formData) {
 
 const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsActivateID, wantsDeactivateID) => {
     const session = userSessions.get(userIdentifier);
-    if (!session || !session.userCodes || session.userCodes.length === 0) {
+    if (!session || !session.userCodes || !session.userCodes.length === 0) {
         userSessions.delete(userIdentifier);
         return;
     }
@@ -1897,53 +1815,47 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
     const { userCodes } = session;
     const userDataMap = await loadUserDataFromExcel();
 
-    const processBatch = async (codes) => {
-        return Promise.all(codes.map(async (userCode) => {
-            try {
-                let fetchedUserData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
-                if (fetchedUserData) {
-                    let passwordResetResult = null;
-                    const maskedName = maskName(toTitleCase(fetchedUserData.Name));
-                    const maskedId = maskUsername(userCode);
-                    let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
+    for (const userCode of userCodes) {
+        try {
+            let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
+            if (fetchedUserData) {
+                let passwordResetResult = null;
+                const maskedName = maskName(toTitleCase(fetchedUserData.Name));
+                const maskedId = maskUsername(userCode);
+                let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
 
-                    if (wantsSessionReset) {
-                        console.log(`Requested Session Cleaning for ${userCode}...`);
-                        const sessionStatus = await resetSession(fetchedUserData);
-                        if (sessionStatus === 'SUCCESS') responseMessage += '\n*Session clear kr diya gya h* ✅';
-                        else if (sessionStatus === 'NOT_ACTIVE') responseMessage += '\nSession active nhi hai ❌';
-                        else responseMessage += '\nFailed to reset session ❌';
-                    }
-                    if (wantsActivateID) {
-                        console.log(`Activating ID for ${userCode}...`);
-                        const result = await DeactivateID(fetchedUserData);
-                        responseMessage += '\n' + (result ? '*Subscriber activated* ✅' : 'Failed to activate ❌');
-                    }
-
-                    if (wantsDeactivateID) {
-                        console.log(`Deactivating ID for ${userCode}...`);
-                        const result = await DeactivateID(fetchedUserData);
-                        responseMessage += '\n' + (result ? '*Subscriber deactivated* ✅' : 'Failed to deactivate ❌');
-                    }
-                    if (wantsPasswordReset) {
-                        console.log(`Requested Password Resetting for ${userCode}...`);
-                        passwordResetResult = await resetPassword(fetchedUserData);
-                        if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) responseMessage += '\n*Reset kr diya gya hai* ✅';
-                        else responseMessage += '\nPassword reset failed';
-                    }
-                    await message.reply(responseMessage);
-                } else {
-                    await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
+                if (wantsSessionReset) {
+                    console.log(`Requested Session Cleaning for ${userCode}...`);
+                    const sessionStatus = await resetSession(fetchedUserData);
+                    if (sessionStatus === 'SUCCESS') responseMessage += '\n*Session clear kr diya gya h* ✅';
+                    else if (sessionStatus === 'NOT_ACTIVE') responseMessage += '\nSession active nhi hai ❌';
+                    else responseMessage += '\nFailed to reset session ❌';
                 }
-            } catch (error) {
-                console.error(`ERROR processing ${userCode}:`, error.message);
-            }
-        }));
-    };
+                if (wantsActivateID) {
+                console.log(`Activating ID for ${userCode}...`);
+                const result = await DeactivateID(fetchedUserData);
+                responseMessage += '\n' + (result ? '*Subscriber activated* ✅' : 'Failed to activate ❌');
+                }
 
-    for (let i = 0; i < userCodes.length; i += 2) {
-        await processBatch(userCodes.slice(i, i + 2));
-        await new Promise(resolve => setTimeout(resolve, 500));
+                if (wantsDeactivateID) {
+                console.log(`Deactivating ID for ${userCode}...`);
+                const result = await DeactivateID(fetchedUserData);
+                responseMessage += '\n' + (result ? '*Subscriber deactivated* ✅' : 'Failed to deactivate ❌');
+                }
+                if (wantsPasswordReset) {
+                    console.log(`Requested Password Resetting for ${userCode}...`);
+                    passwordResetResult = await resetPassword(fetchedUserData);
+                    if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) responseMessage += '\n*Reset kr diya gya hai* ✅';
+                    else responseMessage += '\nPassword reset failed';
+                }
+                await message.reply(responseMessage);
+            } else {
+                await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
+            }
+        } catch (error) {
+            console.error(`CRITICAL ERROR processing ${userCode}:`, error.message);
+            await message.reply(`Could not process *${userCode}*. The server is not responding. Please try again later.`);
+        }
     }
     userSessions.delete(userIdentifier);
 };
@@ -2050,29 +1962,15 @@ const getUsername = async (firstName, baseUsername, cookies) => {
                 timeout: 9000 
             });
             return data;
-        } catch (error) {
-            console.error('Username derivation error:', error.message);
-            return { STATUS: 'ERROR', error: error.message };
-        }
+        } catch { return { STATUS: 'ERROR' }; }
     };
 
     let attempt = 0;
     let response;
-    let lastError = null;
-    
     do {
         response = await tryDerive(baseUsername + (attempt || ''));
-        if (response.error) lastError = response.error;
         attempt++;
-        
-        if (response.STATUS !== 'OK' && attempt < 10) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        }
     } while (response.STATUS !== 'OK' && attempt < 10);
-
-    if (response.STATUS !== 'OK') {
-        console.error(`Failed to derive username after ${attempt} attempts. Last error:`, lastError);
-    }
 
     return response.UNAME || null;
 };
@@ -2521,31 +2419,33 @@ const handleIncomingMessage = async (message) => {
         }
 
         const userIdentifier = getUserIdentifier(message);
-        const messageBody = message.body.toLowerCase().trim();
-        const messageBodyNoSpaces = messageBody.replace(/\s/g, '');
+        const rawBody = message.body; 
+        const lowerCaseBody = rawBody.toLowerCase();
 
         console.log(`User Detail: ${userIdentifier}`);
-        console.log(`Message: ${messageBody}`);
+        console.log(`Message: ${rawBody}`);
 
         const SESSION_TIMEOUT_MS = 300000;
         const EXECUTION_DELAY_MS = 1300;
-        const cleanedInput = message.body.replace(/\s+/g, '');
-        const codePattern = /\bjh\.[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+(?:\.[a-zA-Z0-9._-]+)*\b/gi;
+
+        const codePattern = /jh(\s*\.\s*\w+){2,}/gi;
         const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
-        const codesFromText = (cleanedInput.match(codePattern) || []).concat(message.body.match(subscriberIdPattern) || []);
 
+        const codesFromText = (rawBody.match(codePattern) || []).concat(rawBody.match(subscriberIdPattern) || []);
         const codesFromImage = await extractUsernamesFromImage(message);
-        const codesInThisMessage = [...new Set([...codesFromText, ...codesFromImage])].map(c => c.toLowerCase());
 
-        const wantsSessionReset = /\b(season|session|ip reset|mac)\b/i.test(messageBody);
-        const wantsActivateID = /\b(reactive|reactivate|re-active|re-activated|deactivate)\b/i.test(messageBody);
-        const wantsPasswordReset = /\b(reset|risat|resat|resert|resate|risit|rest|reser|riset)\b/i.test(messageBody);
-        const wantsDeactivateID = /\b(deactivate|deactive)\b/i.test(messageBody);
+        const codesInThisMessage = [...new Set([...codesFromText, ...codesFromImage])]
+            .map(c => c.toLowerCase().replace(/\s/g, ''));
+
+        const wantsSessionReset = /\b(season|session|mac)\b/i.test(lowerCaseBody);
+        const wantsActivateID = /\b(reactive|reactivate|re-active|re-activated)\b/i.test(lowerCaseBody);
+        const wantsPasswordReset = /\b(reset|risat|resat|re-set|resert|resate|risit|rest|reser|riset)\b/i.test(lowerCaseBody);
+        const wantsDeactivateID = /\b(deactivate|deactive|de-activate)\b/i.test(lowerCaseBody);
 
         let serviceProvider = null;
-        if (/\b(hotstar|jiohotstar)\b/i.test(messageBody)) serviceProvider = 'Hotstar_Super';
-        else if (/\b(sony|sonyliv)\b/i.test(messageBody)) serviceProvider = 'SonyPremium';
-        else if (/\b(zee5|zee|zee-5)\b/i.test(messageBody)) serviceProvider = 'ZEE5';
+        if (/\b(hotstar|jiohotstar)\b/i.test(lowerCaseBody)) serviceProvider = 'Hotstar_Super';
+        else if (/\b(sony|sonyliv)\b/i.test(lowerCaseBody)) serviceProvider = 'SonyPremium';
+        else if (/\b(zee5|zee|zee-5)\b/i.test(lowerCaseBody)) serviceProvider = 'ZEE5';
 
         const existingSession = userSessions.get(userIdentifier) || { userCodes: [], pendingActions: {} };
 
@@ -2596,6 +2496,8 @@ const handleIncomingMessage = async (message) => {
             updatedSession.abandonmentTimeoutId = setTimeout(() => userSessions.delete(userIdentifier), SESSION_TIMEOUT_MS);
         }
 
+        const messageBodyNoSpaces = rawBody.replace(/\s/g, '').toLowerCase();
+
         if (messageBodyNoSpaces.includes('subscount') || messageBodyNoSpaces.includes('subscribercount')) {
             const count = await getSubscriberCount();
             const formattedTime = new Date().toLocaleTimeString('en-US');
@@ -2604,12 +2506,12 @@ const handleIncomingMessage = async (message) => {
             return;
         }
 
-        if (messageBody.startsWith('search ')) {
-            const searchTerm = message.body.substring(7).trim();
+        if (lowerCaseBody.startsWith('search ')) {
+            const searchTerm = rawBody.substring(7).trim();
             await handleSubscriberSearch(message, searchTerm);
             return;
         }
-
+        
         if (messageBodyNoSpaces.includes('anpcheck') || messageBodyNoSpaces.includes('apncheck')) {
             await message.reply('ANP Status Check Started...');
             try {
@@ -2621,7 +2523,7 @@ const handleIncomingMessage = async (message) => {
             }
             return;
         }
-
+        
         if (messageBodyNoSpaces.includes('anpupdate')) {
             await handleAnpUpdate(message);
             return;
@@ -2658,7 +2560,7 @@ const handleIncomingMessage = async (message) => {
             await createSLATicket(message);
             return;
         }
-
+        
         if (messageBodyNoSpaces.includes('planchange') || messageBodyNoSpaces.includes('planupdate')) {
             await handlePlanChange(message);
             return;
@@ -2684,16 +2586,9 @@ const handleIncomingMessage = async (message) => {
 };
 
 client.on('ready', async () => {
-    // --- 1. Validate Required Files ---
-    const requiredFiles = ['PortalUsers.xlsx', 'TicketMappingANP.xlsx', 'CAFMappingANP.xlsx', 'Subscribers.xlsx', 'PartnerLive.xlsx'];
-    const missingFiles = requiredFiles.filter(file => !fs.existsSync(path.join(__dirname, file)));
-    
-    if (missingFiles.length > 0) {
-        console.error('CRITICAL: Missing required files:', missingFiles);
-        console.error('Bot functionality will be limited. Please add missing files.');
-    }
 
-    // --- 2. Initial Data Loading ---
+    // --- 1. Initial Data Loading ---
+
     loadProcessedTicketIds();
     loadAnpDownState();
     loadAnpReportState();
@@ -2704,30 +2599,22 @@ client.on('ready', async () => {
     const AUTH_LIFETIME = 282000; // 4 minutes 42 seconds
 
     const forceRefreshSession = async () => {
-    if (forceRefreshSession.isRunning) return;
-    forceRefreshSession.isRunning = true;
-    
-    try {
-        const freshPortalSession = await authenticate('admin', 'Pass@123');
-        const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
-        sessionCache = freshPortalSession;
-        nmsSessionCache = freshNmsCookie;
-        console.log('Bot is healthy.');
-    } catch (err) {
-        console.error('[TIMER] FAILURE: Proactive session refresh failed:', err.message);
-        sessionCache = null;
-        nmsSessionCache = null;
-        const recoveryDelay = 15000; // 15 seconds
-        console.error(`Scheduling recovery attempt in ${recoveryDelay / 1000} seconds.`);
-        setTimeout(() => {
-            forceRefreshSession.isRunning = false;
-            forceRefreshSession();
-        }, recoveryDelay);
-        throw err;
-    } finally {
-        forceRefreshSession.isRunning = false;
-    }
-};
+        try {
+            const freshPortalSession = await authenticate('admin', 'Pass@123');
+            const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
+            sessionCache = freshPortalSession;
+            nmsSessionCache = freshNmsCookie;
+            console.log('Bot is healthy.');
+        } catch (err) {
+            console.error('[TIMER] FAILURE: Proactive session refresh failed:', err.message);
+            sessionCache = null;
+            nmsSessionCache = null;
+            const recoveryDelay = 15000; // 15 seconds
+            console.error(`Scheduling recovery attempt in ${recoveryDelay / 1000} seconds.`);
+            setTimeout(forceRefreshSession, recoveryDelay);
+            throw err;
+        }
+    };
 
     // --- 3. Perform Initial Authentication and Setup Scheduled Tasks ---
     const initialDelay = 3000; // 3 seconds
@@ -2792,31 +2679,13 @@ client.on('ready', async () => {
                 console.error('Scheduled daily task failed:', error.message);
             }
         };
-        cron.schedule('59 23 * * *', async () => {
-        try {
-        await scheduledTask();
-        } catch (error) {
-        console.error('Daily scheduled task failed:', error.message);
-        }
-        }, { timezone: "Asia/Kolkata" });
+        cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // ANP Status Check Task
-        cron.schedule('*/6 * * * *', async () => {
-        try {
-        await runAnpStatusCheckAndNotify();
-        } catch (error) {
-        console.error('ANP status check failed:', error.message);
-        }
-        }, { timezone: "Asia/Kolkata" });
+        cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
         // Ticket Monitoring Task
-        cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, async () => {
-        try {
-        await monitorAndAlertTickets();
-        } catch (error) {
-        console.error('Ticket monitoring failed:', error.message);
-        }
-        }, { timezone: "Asia/Kolkata" });
+        cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
