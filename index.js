@@ -2179,7 +2179,7 @@ const filterInactiveSubscribers = async (message) => {
     }
 };
 
-// Helper function to create Active CSV
+// --- AFTER (FIXED) ---
 const createActiveCSV = (data) => {
     const headers = [
         'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
@@ -2190,8 +2190,9 @@ const createActiveCSV = (data) => {
     let csv = headers.join(',') + '\n';
     data.forEach(row => {
         const values = headers.map(header => {
-            const value = row[header] || '';
-            return value.includes(',') ? `"${value}"` : value;
+            // Convert value to string BEFORE using .includes()
+            const stringValue = (row[header] || '').toString(); 
+            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
         });
         csv += values.join(',') + '\n';
     });
@@ -2199,7 +2200,7 @@ const createActiveCSV = (data) => {
     return csv;
 };
 
-// Helper function to create Inactive CSV
+// --- AFTER (FIXED) ---
 const createInactiveCSV = (data) => {
     const headers = [
         'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
@@ -2210,8 +2211,9 @@ const createInactiveCSV = (data) => {
     let csv = headers.join(',') + '\n';
     data.forEach(row => {
         const values = headers.map(header => {
-            const value = row[header] || '';
-            return value.includes(',') ? `"${value}"` : value;
+            // Convert value to string BEFORE using .includes()
+            const stringValue = (row[header] || '').toString();
+            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
         });
         csv += values.join(',') + '\n';
     });
