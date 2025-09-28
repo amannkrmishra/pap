@@ -1998,14 +1998,14 @@ const filterActiveSubscribers = async (message) => {
                 'Subscriber ID': row.subscriberid || '', 'Username': row.username || '', 'Status': row.status || '',
                 'Registration Date': parseDateFromString(row.registrationdate),
                 'Partner Name': partnerName,
-                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '',
-                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',           
+                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '', // <-- ADDED
+                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',             // <-- ADDED
                 'Expiry': row.expiry || '', 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
-                'Technical Team': partnerDetails ? partnerDetails['Technical Team'] : '',     
-                'Technical Team No.': partnerDetails ? partnerDetails['Technical Team No.'] : '',
+                'Technical Team': partnerDetails ? partnerDetails['Technical Team'] : '',     // <-- ADDED
+                'Technical Team No.': partnerDetails ? partnerDetails['Technical Team No.'] : '', // <-- ADDED
                 'Mobile Number': row.mobileno || '', 'Package Name': packageName, 'Balance': row.balance || ''
             };
             // --- END OF ENRICHMENT LOGIC ---
@@ -2024,7 +2024,7 @@ const filterActiveSubscribers = async (message) => {
 
         // Create and send CSV file
         if (filteredData.length > 0) {
-            const csvContent = createFilteredCSV(filteredData, true);
+            const csvContent = createActiveCSV(filteredData);
             const fileName = `${new Date().toISOString().split('T')[0]}_Active_Filtered.csv`;
             const filePath = path.join(__dirname, fileName);
             fs.writeFileSync(filePath, csvContent);
@@ -2119,14 +2119,14 @@ const filterInactiveSubscribers = async (message) => {
                 'Subscriber ID': row.subscriberid || '', 'Username': row.username || '', 'Status': row.status || '',
                 'Registration Date': regDate,
                 'Partner Name': partnerName,
-                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '',
-                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',  
+                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '', // <-- ADDED
+                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',             // <-- ADDED
                 'Mobile Number': row.mobileno || '', 'Expiry': row.expiry || '', 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
-                'Technical Team': partnerDetails ? partnerDetails['Technical Team'] : '',    
-                'Technical Team No.': partnerDetails ? partnerDetails['Technical Team No.'] : ''
+                'Technical Team': partnerDetails ? partnerDetails['Technical Team'] : '',     // <-- ADDED
+                'Technical Team No.': partnerDetails ? partnerDetails['Technical Team No.'] : '' // <-- ADDED
             };
             // --- END OF ENRICHMENT LOGIC ---
 
@@ -2144,7 +2144,7 @@ const filterInactiveSubscribers = async (message) => {
 
         // Create and send CSV file
         if (filteredData.length > 0) {
-            const csvContent = createFilteredCSV(filteredData, false);
+            const csvContent = createInactiveCSV(filteredData);
             const fileName = `${new Date().toISOString().split('T')[0]}_Inactive_Filtered.csv`;
             const filePath = path.join(__dirname, fileName);
             fs.writeFileSync(filePath, csvContent);
@@ -2163,22 +2163,42 @@ const filterInactiveSubscribers = async (message) => {
     }
 };
 
-const createFilteredCSV = (data, isActiveReport) => {
-    // Define the base headers that are common to both reports
-    const baseHeaders = [
-        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name',
-        'ANP Contact No', 'Cluster', 'Mobile Number', 'Expiry', 'Date', 'District',
-        'Marketing Team', 'Marketing Team No.', 'Technical Team', 'Technical Team No.'
+// --- AFTER (FIXED) ---
+const createActiveCSV = (data) => {
+    const headers = [
+        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
+        'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number', 'Package Name',
+        'Balance', 'Conversation Remark', 'Final Remark'
     ];
-
-    // Conditionally add headers that only exist in the Active report
-    const finalHeaders = isActiveReport 
-        ? [...baseHeaders, 'Package Name', 'Balance'] 
-        : baseHeaders;
-
-    let csv = finalHeaders.join(',') + '\n';
+    
+    let csv = headers.join(',') + '\n';
     data.forEach(row => {
-        const values = finalHeaders.map(header => formatCsvCell(row[header]));
+        const values = headers.map(header => {
+            // Convert value to string BEFORE using .includes()
+            const stringValue = (row[header] || '').toString(); 
+            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
+        });
+        csv += values.join(',') + '\n';
+    });
+    
+    return csv;
+};
+
+// --- AFTER (FIXED) ---
+const createInactiveCSV = (data) => {
+    const headers = [
+        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
+        'Date', 'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number',
+        'Conversation Remark', 'Final Remark'
+    ];
+    
+    let csv = headers.join(',') + '\n';
+    data.forEach(row => {
+        const values = headers.map(header => {
+            // Convert value to string BEFORE using .includes()
+            const stringValue = (row[header] || '').toString();
+            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
+        });
         csv += values.join(',') + '\n';
     });
     
