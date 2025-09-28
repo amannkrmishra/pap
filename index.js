@@ -1999,17 +1999,15 @@ const filterActiveSubscribers = async (message) => {
                 'Username': row.username || '',
                 'Status': row.status || '',
                 'Registration Date': row.registrationdate || '',
-                'Partner Name': partnerName,
                 'Expiry': row.expiry || '',
+                'Partner Name': partnerName,
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
                 'Mobile Number': row.mobileno || '',
                 'Package Name': packageName,
-                'Balance': row.balance || '',
-                'Conversation Remark': '',
-                'Final Remark': ''
+                'Balance': row.balance || ''
             };
             // --- END OF ENRICHMENT LOGIC ---
 
@@ -2123,15 +2121,13 @@ const filterInactiveSubscribers = async (message) => {
                 'Username': row.username || '',
                 'Status': row.status || '',
                 'Registration Date': row.registrationdate || '',
+                'Expiry': row.expiry || '',
                 'Partner Name': partnerName,
                 'Mobile Number': row.mobileno || '',
-                'Expiry': row.expiry || '',
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
-                'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
-                'Conversation Remark': '',
-                'Final Remark': ''
+                'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : ''
             };
             // --- END OF ENRICHMENT LOGIC ---
 
