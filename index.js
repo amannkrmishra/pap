@@ -1920,32 +1920,17 @@ const parseDateFromString = (dateString) => {
     }
     const datePart = dateString.split(' ')[0];
     const parts = datePart.split(/[-/]/);
-    if (parts.length !== 3) {
-        return null;
+    if (parts.length !== 3) { return null; }
+    const day = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10);
+    const year = parseInt(parts[2], 10);
+    if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
+        const date = new Date(year, month - 1, day);
+        if (!isNaN(date.getTime())) {
+            return date;
+        }
     }
-
-    // Manually parse DD, MM, YYYY
-    const day = parts[0];
-    const month = parts[1];
-    const year = parts[2];
-
-    // Basic validation on the parts
-    if (!day || !month || !year || year.length < 4 || month.length < 1 || day.length < 1) {
-        return null;
-    }
-
-    // Reformat to the universally accepted ISO 8601 format (YYYY-MM-DD)
-    // This is the ONLY reliable way to pass a string to the Date constructor.
-    const isoDateString = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
-    
-    const date = new Date(isoDateString);
-
-    // Final validation to catch invalid dates (e.g., from a malformed ISO string)
-    if (isNaN(date.getTime())) {
-        return null;
-    }
-
-    return date;
+    return null;
 };
 
 // New helper function to correctly format values for CSV based on their type
@@ -1954,20 +1939,18 @@ const formatCsvCell = (value) => {
         return '';
     }
     let formattedValue;
-    // Check if the value is a Date object and format it back to DD-MM-YYYY
     if (value instanceof Date && !isNaN(value)) {
-        // Use UTC methods to prevent timezone shifts from changing the date
-        const day = value.getUTCDate().toString().padStart(2, '0');
-        const month = (value.getUTCMonth() + 1).toString().padStart(2, '0');
-        const year = value.getUTCFullYear();
-        formattedValue = `${day}-${month}-${year}`; // Output in DD-MM-YYYY format
+        const year = value.getFullYear();
+        const month = (value.getMonth() + 1).toString().padStart(2, '0');
+        const day = value.getDate().toString().padStart(2, '0');
+        formattedValue = `${year}-${month}-${day}`;
     } else {
         formattedValue = value.toString();
     }
     return formattedValue.includes(',') ? `"${formattedValue}"` : formattedValue;
 };
 
-// Simplified Active Filter - FINAL CORRECTED VERSION
+// Simplified Active Filter - REBUILT WITH CORRECT DATE PARSING
 const filterActiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
@@ -1976,7 +1959,7 @@ const filterActiveSubscribers = async (message) => {
         await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
         const toDate = (await waitForReply(message)).body.trim();
         
-        await chat.sendMessage("Downloading Active Repot Dump..");
+        await chat.sendMessage("Downloading active report and processing...");
         
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
@@ -1991,10 +1974,14 @@ const filterActiveSubscribers = async (message) => {
         });
 
         const lines = response.data.split('\n').filter(line => line.trim());
-        if (lines.length < 2) { await chat.sendMessage("No data found in the report."); return; }
+        if (lines.length < 2) {
+            await chat.sendMessage("No data found in the report.");
+            return;
+        }
         const headers = parseCSVLine(lines[0]);
         const filteredData = [];
-        let removedForBalance = 0, removedForPackage = 0;
+        let removedForBalance = 0;
+        let removedForPackage = 0;
         const currentDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
         for (let i = 1; i < lines.length; i++) {
@@ -2002,19 +1989,23 @@ const filterActiveSubscribers = async (message) => {
             if (values.length < headers.length) continue;
             const row = {};
             headers.forEach((header, index) => { row[header.toLowerCase()] = values[index] || ''; });
-
             const packageName = row.packagename || '';
             const balance = parseFloat(row.balance || '0');
             const partnerName = row.partnercompanyname || '';
 
-            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase() || /\s+x\d+$/i.test(packageName)) { removedForPackage++; continue; }
-            if (balance > 100) { removedForBalance++; continue; }
-
+            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase() || /\s+x\d+$/i.test(packageName)) {
+                removedForPackage++;
+                continue;
+            }
+            if (balance > 100) {
+                removedForBalance++;
+                continue;
+            }
             const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
             
             const cleanRow = {
                 'Subscriber ID': row.subscriberid || '', 'Username': row.username || '', 'Status': row.status || '',
-                'Registration Date': parseDateFromString(row.registrationdate), // Use the robust parser
+                'Registration Date': parseDateFromString(row.registrationdate),
                 'Partner Name': partnerName, 'Expiry': row.expiry || '', 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
@@ -2025,7 +2016,11 @@ const filterActiveSubscribers = async (message) => {
             filteredData.push(cleanRow);
         }
 
-        const summary = `Active Filter Results:\n\n` + `Total rows processed: ${lines.length - 1}\n` + `Rows kept: ${filteredData.length}\n` + `Removed (Balance > 100): ${removedForBalance}\n` + `Removed (Package Filter): ${removedForPackage}`;
+        const summary = `Active Filter Results:\n\n` +
+                       `Total rows processed: ${lines.length - 1}\n` +
+                       `Rows kept: ${filteredData.length}\n` +
+                       `Removed (Balance > 100): ${removedForBalance}\n` +
+                       `Removed (Package Filter): ${removedForPackage}`;
         await chat.sendMessage(summary);
 
         if (filteredData.length > 0) {
@@ -2043,7 +2038,7 @@ const filterActiveSubscribers = async (message) => {
     }
 };
 
-// Inactive Filter - FINAL CORRECTED VERSION
+// Inactive Filter - REBUILT WITH CORRECT DATE PARSING
 const filterInactiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
@@ -2052,7 +2047,7 @@ const filterInactiveSubscribers = async (message) => {
         await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
         const toDate = (await waitForReply(message)).body.trim();
         
-        await chat.sendMessage("Downloading Inactive Report Dump...");
+        await chat.sendMessage("Downloading inactive report and processing...");
         
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
@@ -2065,10 +2060,14 @@ const filterInactiveSubscribers = async (message) => {
         });
 
         const lines = response.data.split('\n').filter(line => line.trim());
-        if (lines.length < 2) { await chat.sendMessage("No data found in the report."); return; }
+        if (lines.length < 2) {
+            await chat.sendMessage("No data found in the report.");
+            return;
+        }
         const headers = parseCSVLine(lines[0]);
         const filteredData = [];
-        let removedForPackage = 0, removedForCurrentMonth = 0;
+        let removedForPackage = 0;
+        let removedForCurrentMonth = 0;
         const currentYear = new Date().getFullYear();
         const currentMonth = new Date().getMonth();
         const currentDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -2105,7 +2104,11 @@ const filterInactiveSubscribers = async (message) => {
             filteredData.push(cleanRow);
         }
 
-        const summary = `Inactive Filter Results:\n\n` + `Total rows processed: ${lines.length - 1}\n` + `Rows kept: ${filteredData.length}\n` + `Removed (Package Filter): ${removedForPackage}\n` + `Removed (Current Month): ${removedForCurrentMonth}`;
+        const summary = `Inactive Filter Results:\n\n` +
+                       `Total rows processed: ${lines.length - 1}\n` +
+                       `Rows kept: ${filteredData.length}\n` +
+                       `Removed (Package Filter): ${removedForPackage}\n` +
+                       `Removed (Current Month): ${removedForCurrentMonth}`;
         await chat.sendMessage(summary);
 
         if (filteredData.length > 0) {
@@ -2123,7 +2126,7 @@ const filterInactiveSubscribers = async (message) => {
     }
 };
 
-// Helper function to create Active CSV - FINAL CORRECTED VERSION
+// Helper function to create Active CSV - USES THE NEW FORMATTER
 const createActiveCSV = (data) => {
     const headers = [
         'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
@@ -2140,7 +2143,7 @@ const createActiveCSV = (data) => {
     return csv;
 };
 
-// Helper function to create Inactive CSV - FINAL CORRECTED VERSION
+// Helper function to create Inactive CSV - USES THE NEW FORMATTER
 const createInactiveCSV = (data) => {
     const headers = [
         'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
