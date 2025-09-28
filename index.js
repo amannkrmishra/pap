@@ -1961,12 +1961,7 @@ const filterActiveSubscribers = async (message) => {
         const filteredData = [];
         let removedForBalance = 0;
         let removedForPackage = 0;
-        const currentDate = new Date().toLocaleDateString('en-US', {
-            weekday: 'long',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-        });
+        const currentDate = new Date().toLocaleDateString('en-GB').replace(/\//g, '-'); // Formats as DD-MM-YYYY
 
         for (let i = 1; i < lines.length; i++) {
             const values = parseCSVLine(lines[i]);
@@ -2091,13 +2086,7 @@ const filterInactiveSubscribers = async (message) => {
         
         const currentYear = new Date().getFullYear();
         const currentMonth = new Date().getMonth();
-        const currentDate = new Date().toLocaleDateString('en-US', {
-            weekday: 'long',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-        });
-
+        const currentDate = new Date().toLocaleDateString('en-GB').replace(/\//g, '-'); // Formats as DD-MM-YYYY
         for (let i = 1; i < lines.length; i++) {
             const values = parseCSVLine(lines[i]);
             if (values.length < headers.length) continue;
