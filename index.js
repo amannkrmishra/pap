@@ -457,9 +457,10 @@ const getTicketDetails = async (ticketUrl, cookies) => {
     return details;
 };
 
-
 const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     try {
+        console.log(`Ticket monitoring started - Triggered by: ${triggeredBy}`);
+        
         const cookies = sessionCache;
         const apiClient = axios.create({
             baseURL: 'https://jh.railwire.co.in',
@@ -495,7 +496,7 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
         }
 
         if (ticketsToCheck.length === 0) {
-            console.log('No "Open" or "Progress" tickets found for allowed subjects.');
+            console.log(`No "Open" or "Progress" tickets found for allowed subjects (${triggeredBy})`);
             return;
         }
 
@@ -504,12 +505,24 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
             const ticketDetails = await getTicketDetails(ticket.viewLink, cookies);
             
             if (ticketDetails) {
+                // Handle missing cluster data
+                if (!ticketDetails.cluster) {
+                    console.log(`Skipping ticket #${ticket.ticketId} - No cluster data available`);
+                    continue;
+                }
+                
+                // Case-insensitive cluster check
+                if (ticketDetails.cluster.toLowerCase() !== 'tatanagar') {
+                    console.log(`Skipping ticket #${ticket.ticketId} - Cluster: ${ticketDetails.cluster}`);
+                    continue;
+                }
+                
                 const currentMessageCount = ticketDetails.messages.length;
                 const lastKnownState = processedTicketsState[ticket.ticketId];
 
                 // SCENARIO 1: Brand new ticket
                 if (!lastKnownState) {
-                    console.log(`New ticket found: #${ticket.ticketId}`);
+                    console.log(`New ticket found: #${ticket.ticketId} (${triggeredBy})`);
                     changesFound = true;
                     const formattedMessage = formatTicketMessage(ticketDetails);
                     await sendTicketAlert(formattedMessage);
@@ -518,7 +531,7 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
                 } 
                 // SCENARIO 2: Existing ticket has a new reply
                 else if (lastKnownState.messageCount < currentMessageCount) {
-                    console.log(`Update found for ticket #${ticket.ticketId} (New message)`);
+                    console.log(`Update found for ticket #${ticket.ticketId} (New message) - ${triggeredBy}`);
                     changesFound = true;
                     const formattedMessage = formatTicketMessage(ticketDetails);
                     await sendTicketAlert(formattedMessage);
@@ -529,10 +542,10 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
         }
 
         if (!changesFound) {
-            console.log(`Checked ${ticketsToCheck.length} active tickets. No new messages or tickets found.`);
+            console.log(`Checked ${ticketsToCheck.length} active tickets. No new messages or tickets found (${triggeredBy})`);
         }
     } catch (error) {
-        console.error('Error during ticket monitoring:', error.message);
+        console.error(`Error during ticket monitoring (${triggeredBy}):`, error.message);
     }
 };
 
