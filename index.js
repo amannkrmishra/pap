@@ -1920,21 +1920,32 @@ const parseDateFromString = (dateString) => {
     }
     const datePart = dateString.split(' ')[0];
     const parts = datePart.split(/[-/]/);
-    if (parts.length !== 3) { return null; }
-
-    const day = parseInt(parts[0], 10);
-    const month = parseInt(parts[1], 10);
-    const year = parseInt(parts[2], 10);
-
-    if (!isNaN(day) && !isNaN(month) && !isNaN(year) && year > 1970) {
-        // JS months are 0-11, so we subtract 1
-        const date = new Date(year, month - 1, day);
-        // This validation is the guarantee it's a correct date
-        if (date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day) {
-            return date;
-        }
+    if (parts.length !== 3) {
+        return null;
     }
-    return null;
+
+    // Manually parse DD, MM, YYYY
+    const day = parts[0];
+    const month = parts[1];
+    const year = parts[2];
+
+    // Basic validation on the parts
+    if (!day || !month || !year || year.length < 4 || month.length < 1 || day.length < 1) {
+        return null;
+    }
+
+    // Reformat to the universally accepted ISO 8601 format (YYYY-MM-DD)
+    // This is the ONLY reliable way to pass a string to the Date constructor.
+    const isoDateString = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+    
+    const date = new Date(isoDateString);
+
+    // Final validation to catch invalid dates (e.g., from a malformed ISO string)
+    if (isNaN(date.getTime())) {
+        return null;
+    }
+
+    return date;
 };
 
 // New helper function to correctly format values for CSV based on their type
@@ -1943,10 +1954,12 @@ const formatCsvCell = (value) => {
         return '';
     }
     let formattedValue;
+    // Check if the value is a Date object and format it back to DD-MM-YYYY
     if (value instanceof Date && !isNaN(value)) {
-        const day = value.getDate().toString().padStart(2, '0');
-        const month = (value.getMonth() + 1).toString().padStart(2, '0');
-        const year = value.getFullYear();
+        // Use UTC methods to prevent timezone shifts from changing the date
+        const day = value.getUTCDate().toString().padStart(2, '0');
+        const month = (value.getUTCMonth() + 1).toString().padStart(2, '0');
+        const year = value.getUTCFullYear();
         formattedValue = `${day}-${month}-${year}`; // Output in DD-MM-YYYY format
     } else {
         formattedValue = value.toString();
