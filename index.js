@@ -64,6 +64,7 @@ let lastStillDownReportTime = 0;
 const PROCESSED_TICKETS_STATE_FILE_PATH = path.join(__dirname, 'processedTicketsState.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
 const ANP_REPORT_STATE_FILE_PATH = path.join(__dirname, 'anpReportState.json');
+const PackageNameToFilterOut = "FUP10Mbps-1Mbps 30GB";
 let processedTicketsState = {};
 let sessionCache = null;
 const userDataCacheByFile = {};
@@ -89,6 +90,27 @@ const ANP_CONFIG = {
         'Purbi Singhbhum'
     ])
     // -------------------------
+};
+
+// Helper function to parse CSV data properly
+const parseCSVLine = (line) => {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+            inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+            result.push(current.trim());
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+    result.push(current.trim());
+    return result;
 };
 
 // -- Set of allowed ticket subjects that the bot will process and alert on
@@ -1873,6 +1895,343 @@ async function checkSessionStatus(subscriberCode) {
     }
 }
 
+// Simplified Active Filter
+const filterActiveSubscribers = async (message) => {
+    const chat = await message.getChat();
+    try {
+        await chat.sendMessage("Enter FROM date (YYYY-MM-DD):");
+        const fromDate = (await waitForReply(message)).body.trim();
+        await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
+        const toDate = (await waitForReply(message)).body.trim();
+        
+        await chat.sendMessage("Downloading active report and processing...");
+        
+        const cookies = sessionCache;
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        
+        // Set date range for active report
+        await axios.post('https://jh.railwire.co.in/ajx_datatables/sub_activesearch', 
+            new URLSearchParams({
+                'partnerid': 'All',
+                'railwire_test_name': cookies.railwireCookie.value,
+                'st': fromDate,
+                'ed': toDate
+            }), {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': cookieString,
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+
+        // Download CSV
+        const response = await axios.get('https://jh.railwire.co.in/billcntl/activesubreport', {
+            headers: { 'Cookie': cookieString },
+            responseType: 'text'
+        });
+
+        // Parse CSV data
+        const lines = response.data.split('\n').filter(line => line.trim());
+        if (lines.length < 2) {
+            await chat.sendMessage("No data found in the report.");
+            return;
+        }
+
+        const headers = parseCSVLine(lines[0]);
+        const anpMapping = partnerLiveDetailsCache || loadPartnerLiveDetails();
+
+        // Process and filter data
+        const filteredData = [];
+        let removedForBalance = 0;
+        let removedForPackage = 0;
+        const currentDate = new Date().toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+        });
+
+        for (let i = 1; i < lines.length; i++) {
+            const values = parseCSVLine(lines[i]);
+            if (values.length < headers.length) continue;
+
+            const row = {};
+            headers.forEach((header, index) => {
+                row[header.toLowerCase()] = values[index] || '';
+            });
+
+            const packageName = row.packagename || '';
+            const balance = parseFloat(row.balance || '0');
+            const partnerName = row.partnercompanyname || '';
+
+            // Filter 1: Remove specific package
+            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
+                removedForPackage++;
+                continue;
+            }
+
+            // Filter 2: Remove packages ending with " x[number]"
+            if (/\s+x\d+$/i.test(packageName)) {
+                removedForPackage++;
+                continue;
+            }
+
+            // Filter 3: Remove if balance > 100
+            if (balance > 100) {
+                removedForBalance++;
+                continue;
+            }
+
+            // Create clean row with district and marketing mapping
+            const cleanRow = {
+                'Subscriber ID': row.subscriberid || '',
+                'Username': row.username || '',
+                'Status': row.status || '',
+                'Registration Date': row.registrationdate || '',
+                'Partner Name': partnerName,
+                'Expiry': row.expiry || '',
+                'Date': currentDate,
+                'District': '',
+                'Marketing Team': '',
+                'Marketing Team No.': '',
+                'Mobile Number': row.mobileno || '',
+                'Package Name': packageName,
+                'Balance': row.balance || '',
+                'Conversation Remark': '',
+                'Final Remark': ''
+            };
+
+            // Add district and marketing details from ANP mapping
+            const partnerId = Object.keys(anpMapping).find(id => 
+                anpMapping[id]['Partner Name'] && 
+                anpMapping[id]['Partner Name'].toLowerCase() === partnerName.toLowerCase()
+            );
+
+            if (partnerId && anpMapping[partnerId]) {
+                cleanRow['District'] = anpMapping[partnerId]['District'] || '';
+                cleanRow['Marketing Team'] = anpMapping[partnerId]['Marketing Team'] || '';
+                cleanRow['Marketing Team No.'] = anpMapping[partnerId]['Marketing Team No.'] || '';
+            }
+
+            filteredData.push(cleanRow);
+        }
+
+        // Create summary
+        const summary = `Active Filter Results:\n\n` +
+                       `Total rows processed: ${lines.length - 1}\n` +
+                       `Rows kept: ${filteredData.length}\n` +
+                       `Removed (Balance > 100): ${removedForBalance}\n` +
+                       `Removed (Package Filter): ${removedForPackage}`;
+
+        await chat.sendMessage(summary);
+
+        // Create and send CSV file
+        if (filteredData.length > 0) {
+            const csvContent = createActiveCSV(filteredData);
+            const fileName = `${new Date().toISOString().split('T')[0]}_Active_Filtered.csv`;
+            const filePath = path.join(__dirname, fileName);
+            fs.writeFileSync(filePath, csvContent);
+            
+            const media = MessageMedia.fromFilePath(filePath);
+            await chat.sendMessage(media, { caption: 'Filtered Active Subscribers' });
+            
+            // Clean up file after 5 seconds
+            setTimeout(() => {
+                try { fs.unlinkSync(filePath); } catch {}
+            }, 5000);
+        }
+
+    } catch (error) {
+        console.error('Error in filterActiveSubscribers:', error.message);
+        await chat.sendMessage("Error processing active filter: " + error.message);
+    }
+};
+
+const filterInactiveSubscribers = async (message) => {
+    const chat = await message.getChat();
+    try {
+        await chat.sendMessage("Enter FROM date (YYYY-MM-DD):");
+        const fromDate = (await waitForReply(message)).body.trim();
+        await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
+        const toDate = (await waitForReply(message)).body.trim();
+        
+        await chat.sendMessage("Downloading inactive report and processing...");
+        
+        const cookies = sessionCache;
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        
+        // Set date range for inactive report
+        await axios.get(`https://jh.railwire.co.in/billcntl/submngisub/${fromDate}/${toDate}/All`, {
+            headers: {
+                'Cookie': cookieString,
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        });
+
+        // Download CSV
+        const response = await axios.get('https://jh.railwire.co.in/billcntl/inactivesubreport', {
+            headers: { 'Cookie': cookieString },
+            responseType: 'text'
+        });
+
+        // Parse CSV data
+        const lines = response.data.split('\n').filter(line => line.trim());
+        if (lines.length < 2) {
+            await chat.sendMessage("No data found in the report.");
+            return;
+        }
+
+        const headers = parseCSVLine(lines[0]);
+        const anpMapping = partnerLiveDetailsCache || loadPartnerLiveDetails();
+
+        // Process and filter data
+        const filteredData = [];
+        let removedForPackage = 0;
+        let removedForCurrentMonth = 0;
+        
+        const currentYear = new Date().getFullYear();
+        const currentMonth = new Date().getMonth();
+        const currentDate = new Date().toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+        });
+
+        for (let i = 1; i < lines.length; i++) {
+            const values = parseCSVLine(lines[i]);
+            if (values.length < headers.length) continue;
+
+            const row = {};
+            headers.forEach((header, index) => {
+                row[header.toLowerCase()] = values[index] || '';
+            });
+
+            const packageName = row.packagename || '';
+            const partnerName = row.partnercompanyname || '';
+            const regDate = row.registrationdate ? new Date(row.registrationdate) : null;
+
+            // Filter 1: Remove specific package
+            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
+                removedForPackage++;
+                continue;
+            }
+
+            // Filter 2: Remove packages ending with " x[number]"
+            if (/\s+x\d+$/i.test(packageName)) {
+                removedForPackage++;
+                continue;
+            }
+
+            // Filter 3: Remove current month registrations
+            if (regDate && regDate.getFullYear() === currentYear && regDate.getMonth() === currentMonth) {
+                removedForCurrentMonth++;
+                continue;
+            }
+
+            // Create clean row with district and marketing mapping
+            const cleanRow = {
+                'Subscriber ID': row.subscriberid || '',
+                'Username': row.username || '',
+                'Status': row.status || '',
+                'Registration Date': row.registrationdate || '',
+                'Partner Name': partnerName,
+                'Mobile Number': row.mobileno || '',
+                'Expiry': row.expiry || '',
+                'Date': currentDate,
+                'District': '',
+                'Marketing Team': '',
+                'Marketing Team No.': '',
+                'Conversation Remark': '',
+                'Final Remark': ''
+            };
+
+            // Add district and marketing details from ANP mapping
+            const partnerId = Object.keys(anpMapping).find(id => 
+                anpMapping[id]['Partner Name'] && 
+                anpMapping[id]['Partner Name'].toLowerCase() === partnerName.toLowerCase()
+            );
+
+            if (partnerId && anpMapping[partnerId]) {
+                cleanRow['District'] = anpMapping[partnerId]['District'] || '';
+                cleanRow['Marketing Team'] = anpMapping[partnerId]['Marketing Team'] || '';
+                cleanRow['Marketing Team No.'] = anpMapping[partnerId]['Marketing Team No.'] || '';
+            }
+
+            filteredData.push(cleanRow);
+        }
+
+        // Create summary
+        const summary = `Inactive Filter Results:\n\n` +
+                       `Total rows processed: ${lines.length - 1}\n` +
+                       `Rows kept: ${filteredData.length}\n` +
+                       `Removed (Package Filter): ${removedForPackage}\n` +
+                       `Removed (Current Month): ${removedForCurrentMonth}`;
+
+        await chat.sendMessage(summary);
+
+        // Create and send CSV file
+        if (filteredData.length > 0) {
+            const csvContent = createInactiveCSV(filteredData);
+            const fileName = `${new Date().toISOString().split('T')[0]}_Inactive_Filtered.csv`;
+            const filePath = path.join(__dirname, fileName);
+            fs.writeFileSync(filePath, csvContent);
+            
+            const media = MessageMedia.fromFilePath(filePath);
+            await chat.sendMessage(media, { caption: 'Filtered Inactive Subscribers' });
+            
+            // Clean up file after 5 seconds
+            setTimeout(() => {
+                try { fs.unlinkSync(filePath); } catch {}
+            }, 5000);
+        }
+
+    } catch (error) {
+        console.error('Error in filterInactiveSubscribers:', error.message);
+        await chat.sendMessage("Error processing inactive filter: " + error.message);
+    }
+};
+
+// Helper function to create Active CSV
+const createActiveCSV = (data) => {
+    const headers = [
+        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
+        'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number', 'Package Name',
+        'Balance', 'Conversation Remark', 'Final Remark'
+    ];
+    
+    let csv = headers.join(',') + '\n';
+    data.forEach(row => {
+        const values = headers.map(header => {
+            const value = row[header] || '';
+            return value.includes(',') ? `"${value}"` : value;
+        });
+        csv += values.join(',') + '\n';
+    });
+    
+    return csv;
+};
+
+// Helper function to create Inactive CSV
+const createInactiveCSV = (data) => {
+    const headers = [
+        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
+        'Date', 'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number',
+        'Conversation Remark', 'Final Remark'
+    ];
+    
+    let csv = headers.join(',') + '\n';
+    data.forEach(row => {
+        const values = headers.map(header => {
+            const value = row[header] || '';
+            return value.includes(',') ? `"${value}"` : value;
+        });
+        csv += values.join(',') + '\n';
+    });
+    
+    return csv;
+};
+
 async function ChangePlan(formData) {
     try {
         const cookies = sessionCache;
@@ -2645,6 +3004,17 @@ const handleIncomingMessage = async (message) => {
         if (messageBodyNoSpaces.includes('anpupdate')) {
             await handleAnpUpdate(message);
             return;
+        }
+
+        // Add these to your handleIncomingMessage function:
+        if (messageBodyNoSpaces.includes('activefilter')) {
+        await filterActiveSubscribers(message);
+        return;
+        }
+
+        if (messageBodyNoSpaces.includes('inactivefilter')) {
+        await filterInactiveSubscribers(message);
+        return;
         }
 
         if (messageBodyNoSpaces.includes('checktickets')) {
