@@ -43,7 +43,7 @@ const Tesseract = require('tesseract.js');
 const axios = require('axios');
 const fs = require('fs');
 const qrcode = require('qrcode-terminal');
-const readXlsxFile = require('read-excel-file/node');
+let partnerNameLookupCache = null;
 const path = require('path');
 const {
     publicEncrypt,
@@ -75,7 +75,7 @@ const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
     TARGET_ID: '916200493605@c.us',
     GROUP_NAME: 'Super Bot - LightWave',
-    EXCEL_FILE_NAME: 'PartnerLive.xlsx',
+    EXCEL_FILE_NAME: 'AllData.xlsx',
     IGNORED_PARTNER_IDS: new Set([
         '3474487439', '5283639869', '2568065682', '2425852224', '6378518993',
         '8878892435', '6834570680', '6195650370', '6933249503', '5950839426',
@@ -571,94 +571,141 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     }
 };
 
-const loadAllData = async () => {
-    try {
-        await Promise.all([
-            loadUserDataFromExcel(),
-            loadExcelData(),
-            loadPartnerMappings(),
-            loadSubscriberData(),
-            loadPartnerLiveDetails()
-        ]);
-    } catch (err) {
-        console.error('Error loading data:', err.message);
-    }
-};
-
-const loadUserDataFromExcel = async (filename = 'PortalUsers.xlsx') => {
-    if (userDataCacheByFile[filename]) return userDataCacheByFile[filename];
+// -- This single function replaces all previous Excel loading functions --
+const loadConsolidatedData = (filename = 'AllData.xlsx') => {
+    // Re-initialize all caches to ensure fresh data
+    subscriberDataCache = new Map();
+    partnerLiveDetailsCache = {};
+    partnerMappings = {};
+    jhCodeMap = new Map();
+    partnerIndex = new Map();
+    partnerNameLookupCache = new Map(); // Initialize the new cache
+    const portalUsersCache = new Map(); 
 
     try {
-        const filePath = path.resolve(__dirname, filename);
-        const rows = await readXlsxFile(filePath);
-        if (!rows || rows.length < 2) return new Map();
-
-        const [header, ...data] = rows;
-        const headerMap = createHeaderMap(header);
-
-
-        const idxUsername = headerMap['Username'];
-        const idxName = headerMap['Name'];
-        const idxMobileNo = headerMap['MobileNo'];
-        const idxSubscriberId = headerMap['SubscriberId'];
-        const idxEmail = headerMap['Email'];
-
-        const userDataCache = new Map();
-
-        for (let i = 0, len = data.length; i < len; i++) {
-            const row = data[i];
-            const username = normalize(row[idxUsername]);
-            const name = normalize(row[idxName]);
-            const mobileNo = normalize(row[idxMobileNo]);
-            const subscriberId = normalize(row[idxSubscriberId]);
-            const email = normalize(row[idxEmail]);
-
-            const userData = {
-                MobileNo: mobileNo,
-                Username: username,
-                SubscriberId: subscriberId,
-                Name: name,
-                Email: email
-            };
-
-            if (username) userDataCache.set(username, userData);
-            if (subscriberId) userDataCache.set(subscriberId, userData);
+        const filePath = path.join(__dirname, filename);
+        if (!fs.existsSync(filePath)) {
+            console.error(`CRITICAL: Consolidated data file not found at ${filePath}`);
+            return;
         }
 
-        userDataCacheByFile[filename] = userDataCache;
-        return userDataCache;
-    } catch (err) {
-        console.error(`Error loading user data from Excel: ${err.message}`);
-        return new Map();
-    }
-};
-
-const loadPartnerMappings = (filename = 'TicketMappingANP.xlsx') => {
-    if (partnerMappings) return partnerMappings;
-
-    try {
-        const workbook = XLSX.readFile(path.join(__dirname, filename));
-        const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
-
-        partnerMappings = {};
+        const workbook = XLSX.readFile(filePath);
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet);
 
         for (const row of rows) {
-            const jhCode = row['JH Code']?.trim();
-            const partnerId = row['Partner ID']?.toString().trim();
+            const subscriberId = normalize(row['Subscriber ID']);
+            const username = normalize(row['Username']);
+            const anpId = normalize(row['ANP ID']);
+            const anpName = normalize(row['ANP Name']);
+            const jhCode = normalize(row['JH Code']);
 
-            if (jhCode && partnerId) {
-                partnerMappings[jhCode] = {
-                    partnerId: partnerId,
-                    partnerName: row['Partner Name']?.trim() || 'Unknown'
+            // --- VLOOKUP CACHE POPULATION ---
+            // Create the lookup map keyed by Partner Name for filtering functions
+            if (anpName && !partnerNameLookupCache.has(anpName)) {
+                partnerNameLookupCache.set(anpName, {
+                    'District': row['District'],
+                    'Marketing Team': row['Marketing Team'],
+                    'Marketing Team No.': row['Marketing Team No.']
+                });
+            }
+            // ------------------------------------
+
+            // 1. Populate subscriberDataCache and portalUsersCache
+            if (username || subscriberId) {
+                 const subscriberDetails = {
+                    'Subscriber ID': row['Subscriber ID'],
+                    'Username': row['Username'],
+                    'Name': row['Subscriber Name'],
+                    'MobileNo': row['Subscriber Mobile'],
+                    'Email': row['Subscriber Email'],
+                    'ANP ID': row['ANP ID'],
+                    'ANP Name': row['ANP Name'],
+                    'ANP Contact No': row['ANP Contact No'],
+                    'District': row['District'],
+                    'Cluster': row['Cluster'],
+                    'Stack VLAN': row['Stack VLAN'],
+                    'Customer VLAN': row['Customer VLAN'],
+                    'JH Code': row['JH Code'],
+                    'Subscriber Count': row['Subscriber Count'],
+                    'Port': row['Primary Port'],
+                    'Backup Port': row['Backup Port'],
+                    'BNG': row['BNG'],
+                    'Marketing Team': row['Marketing Team'],
+                    'Marketing Team No.': row['Marketing Team No.'],
+                    'Technical Team': row['Technical Team'],
+                    'Technical Team No.': row['Technical Team No.']
+                };
+                
+                if (subscriberId) {
+                    subscriberDataCache.set(subscriberId, subscriberDetails);
+                    portalUsersCache.set(subscriberId, subscriberDetails);
+                }
+                if (username) {
+                    subscriberDataCache.set(username, subscriberDetails);
+                    portalUsersCache.set(username, subscriberDetails);
+                }
+            }
+
+            // 2. Populate partner-level caches (only once per partner)
+            if (anpId && !partnerLiveDetailsCache[anpId]) {
+                 partnerLiveDetailsCache[anpId] = {
+                    'Partner ID': anpId,
+                    'Partner Name': row['ANP Name'],
+                    'ANP Contact No': row['ANP Contact No'],
+                    'District': row['District'],
+                    'Cluster': row['Cluster'],
+                    'JH Code': row['JH Code'],
+                    'Stack VLAN': row['Stack VLAN'],
+                    'Customer VLAN': row['Customer VLAN'],
+                    'Primary Port': row['Primary Port'],
+                    'Backup Port': row['Backup Port'],
+                    'BNG': row['BNG'],
+                    'Marketing Team': row['Marketing Team'],
+                    'Marketing Team No.': row['Marketing Team No.'],
+                    'Technical Team': row['Technical Team'],
+                    'Technical Team No.': row['Technical Team No.']
                 };
             }
+            
+            if (jhCode && !partnerMappings[jhCode]) {
+                partnerMappings[jhCode] = {
+                    partnerId: anpId,
+                    partnerName: anpName,
+                };
+            }
+
+            if (anpName && jhCode && !jhCodeMap.has(normalize(anpName))) {
+                 jhCodeMap.set(normalize(anpName), jhCode);
+
+                const words = anpName.toLowerCase().split(' ');
+                for (const word of words) {
+                    if (word.length > 2) {
+                        if (!partnerIndex.has(word)) {
+                            partnerIndex.set(word, new Set());
+                        }
+                        partnerIndex.get(word).add(normalize(anpName));
+                    }
+                }
+            }
         }
-        return partnerMappings;
+        
+        userDataCacheByFile['AllData'] = portalUsersCache;
+        console.log(`Successfully loaded consolidated data for ${subscriberDataCache.size} subscribers and ${Object.keys(partnerLiveDetailsCache).length} partners.`);
+
     } catch (err) {
-        console.error(`Error reading partner mappings: ${err.message}`);
-        return {};
+        console.error(`Error reading consolidated data from Excel: ${err.message}`);
     }
 };
+
+const loadAllData = async () => {
+    try {
+        loadConsolidatedData(); 
+    } catch (err) {
+        console.error('Error loading consolidated data:', err.message);
+    }
+};
+
 
 const getSubscriberCount = async () => {
     try {
@@ -685,39 +732,7 @@ const getSubscriberCount = async () => {
 };
 
 
-const loadExcelData = () => {
-    if (jhCodeMap) return;
 
-    try {
-        const workbook = XLSX.readFile(path.join(__dirname, 'CAFMappingANP.xlsx'));
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const data = XLSX.utils.sheet_to_json(sheet);
-
-        jhCodeMap = new Map();
-        partnerIndex = new Map();
-
-        for (const row of data) {
-            const partner = normalize(row['Associated Partner']);
-            const jhCode = row['JH Code'];
-
-            if (partner && jhCode) {
-                jhCodeMap.set(partner, jhCode);
-
-                const words = partner.split(' ');
-                for (const word of words) {
-                    if (word.length > 2) {
-                        if (!partnerIndex.has(word)) {
-                            partnerIndex.set(word, new Set());
-                        }
-                        partnerIndex.get(word).add(partner);
-                    }
-                }
-            }
-        }
-    } catch (err) {
-        console.error(`Error reading Excel file: ${err.message}`);
-    }
-};
 
 
 const handleSubscriberUpdate = async (message) => {
@@ -730,10 +745,10 @@ const handleSubscriberUpdate = async (message) => {
             await chat.sendMessage("Canceled. No ID provided.");
             return;
         }
-        const userDataMap = await loadUserDataFromExcel();
+        const userDataMap = userDataCacheByFile['AllData'];
         const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
 
-        if (!userData || !userData.SubscriberId) {
+        if (!userData || !userData['Subscriber ID']) {
             await chat.sendMessage(`Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
             return;
         }
@@ -758,7 +773,7 @@ const handleSubscriberUpdate = async (message) => {
         const payload = new URLSearchParams({
             'cnumber': newPhoneNumber,
             'cemail': newEmail,
-            'id': userData.SubscriberId,
+            'id': userData['Subscriber ID'],
             'railwire_test_name': cookies.railwireCookie.value
         });
         const config = {
@@ -798,7 +813,8 @@ const handleBulkSubscriberUpdate = async (message) => {
     for (const userCode of userCodes) {
         try {
             const userData = await fetchUserDataFromPortal(userCode);
-            if (!userData || !userData.SubscriberId || !userData.Username) {
+            const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
+            if (!subscriberId || !userData.Username) {
                 await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
                 continue;
             }
@@ -810,7 +826,7 @@ const handleBulkSubscriberUpdate = async (message) => {
             const payload = new URLSearchParams({
                 'cnumber': newPhoneNumber,
                 'cemail': newEmail,
-                'id': userData.SubscriberId,
+                'id': userData['Subscriber ID'],
                 'railwire_test_name': cookies.railwireCookie.value
             });
             const config = {
@@ -1151,7 +1167,8 @@ const resetSession = async (userData) => {
 const DeactivateID = async (userData) => {
     try {
         const cookies = sessionCache;
-        const payload = `subid=${userData.SubscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
+        const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
+        const payload = `subid=${subscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
         const config = {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -1177,7 +1194,8 @@ const resetPassword = async (userData) => {
                 'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
             }
         };
-        const basePayload = `subid=${userData.SubscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
+        const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
+        const basePayload = `subid=${subscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
         const [portalRes, pppoeRes] = await Promise.all([
             axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Bill`, config),
             axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Internet`, config)
@@ -1560,7 +1578,7 @@ const processOTTComplaint = async (message, userIdentifier, serviceProvider) => 
     const chat = await message.getChat();
 
     // Load OTT data
-    const ottData = await loadUserDataFromExcel();
+    const ottData = userDataCacheByFile['AllData'];
     const userData = ottData.get(userCode);
 
     if (!userData) {
@@ -1895,7 +1913,7 @@ async function checkSessionStatus(subscriberCode) {
     }
 }
 
-// Simplified Active Filter
+// Simplified Active Filter - REBUILT WITH LOGIC FROM MainForm.cs
 const filterActiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
@@ -1938,8 +1956,7 @@ const filterActiveSubscribers = async (message) => {
         }
 
         const headers = parseCSVLine(lines[0]);
-        const anpMapping = partnerLiveDetailsCache || loadPartnerLiveDetails();
-
+        
         // Process and filter data
         const filteredData = [];
         let removedForBalance = 0;
@@ -1964,25 +1981,24 @@ const filterActiveSubscribers = async (message) => {
             const balance = parseFloat(row.balance || '0');
             const partnerName = row.partnercompanyname || '';
 
-            // Filter 1: Remove specific package
+            // --- FILTERING LOGIC FROM C# APP ---
             if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
                 removedForPackage++;
                 continue;
             }
-
-            // Filter 2: Remove packages ending with " x[number]"
             if (/\s+x\d+$/i.test(packageName)) {
                 removedForPackage++;
                 continue;
             }
-
-            // Filter 3: Remove if balance > 100
             if (balance > 100) {
                 removedForBalance++;
                 continue;
             }
+            // --- END OF FILTERING LOGIC ---
 
-            // Create clean row with district and marketing mapping
+            // --- DATA ENRICHMENT (VLOOKUP) LOGIC FROM C# APP ---
+            const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
+            
             const cleanRow = {
                 'Subscriber ID': row.subscriberid || '',
                 'Username': row.username || '',
@@ -1991,27 +2007,16 @@ const filterActiveSubscribers = async (message) => {
                 'Partner Name': partnerName,
                 'Expiry': row.expiry || '',
                 'Date': currentDate,
-                'District': '',
-                'Marketing Team': '',
-                'Marketing Team No.': '',
+                'District': partnerDetails ? partnerDetails['District'] : '',
+                'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
+                'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
                 'Mobile Number': row.mobileno || '',
                 'Package Name': packageName,
                 'Balance': row.balance || '',
                 'Conversation Remark': '',
                 'Final Remark': ''
             };
-
-            // Add district and marketing details from ANP mapping
-            const partnerId = Object.keys(anpMapping).find(id => 
-                anpMapping[id]['Partner Name'] && 
-                anpMapping[id]['Partner Name'].toLowerCase() === partnerName.toLowerCase()
-            );
-
-            if (partnerId && anpMapping[partnerId]) {
-                cleanRow['District'] = anpMapping[partnerId]['District'] || '';
-                cleanRow['Marketing Team'] = anpMapping[partnerId]['Marketing Team'] || '';
-                cleanRow['Marketing Team No.'] = anpMapping[partnerId]['Marketing Team No.'] || '';
-            }
+            // --- END OF ENRICHMENT LOGIC ---
 
             filteredData.push(cleanRow);
         }
@@ -2035,7 +2040,6 @@ const filterActiveSubscribers = async (message) => {
             const media = MessageMedia.fromFilePath(filePath);
             await chat.sendMessage(media, { caption: 'Filtered Active Subscribers' });
             
-            // Clean up file after 5 seconds
             setTimeout(() => {
                 try { fs.unlinkSync(filePath); } catch {}
             }, 5000);
@@ -2047,6 +2051,7 @@ const filterActiveSubscribers = async (message) => {
     }
 };
 
+// Inactive Filter - REBUILT WITH LOGIC FROM MainForm.cs
 const filterInactiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
@@ -2060,7 +2065,6 @@ const filterInactiveSubscribers = async (message) => {
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
-        // Set date range for inactive report
         await axios.get(`https://jh.railwire.co.in/billcntl/submngisub/${fromDate}/${toDate}/All`, {
             headers: {
                 'Cookie': cookieString,
@@ -2068,13 +2072,11 @@ const filterInactiveSubscribers = async (message) => {
             }
         });
 
-        // Download CSV
         const response = await axios.get('https://jh.railwire.co.in/billcntl/inactivesubreport', {
             headers: { 'Cookie': cookieString },
             responseType: 'text'
         });
 
-        // Parse CSV data
         const lines = response.data.split('\n').filter(line => line.trim());
         if (lines.length < 2) {
             await chat.sendMessage("No data found in the report.");
@@ -2082,9 +2084,7 @@ const filterInactiveSubscribers = async (message) => {
         }
 
         const headers = parseCSVLine(lines[0]);
-        const anpMapping = partnerLiveDetailsCache || loadPartnerLiveDetails();
 
-        // Process and filter data
         const filteredData = [];
         let removedForPackage = 0;
         let removedForCurrentMonth = 0;
@@ -2111,25 +2111,24 @@ const filterInactiveSubscribers = async (message) => {
             const partnerName = row.partnercompanyname || '';
             const regDate = row.registrationdate ? new Date(row.registrationdate) : null;
 
-            // Filter 1: Remove specific package
+            // --- FILTERING LOGIC FROM C# APP ---
             if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
                 removedForPackage++;
                 continue;
             }
-
-            // Filter 2: Remove packages ending with " x[number]"
             if (/\s+x\d+$/i.test(packageName)) {
                 removedForPackage++;
                 continue;
             }
-
-            // Filter 3: Remove current month registrations
             if (regDate && regDate.getFullYear() === currentYear && regDate.getMonth() === currentMonth) {
                 removedForCurrentMonth++;
                 continue;
             }
+            // --- END OF FILTERING LOGIC ---
 
-            // Create clean row with district and marketing mapping
+            // --- DATA ENRICHMENT (VLOOKUP) LOGIC FROM C# APP ---
+            const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
+
             const cleanRow = {
                 'Subscriber ID': row.subscriberid || '',
                 'Username': row.username || '',
@@ -2139,24 +2138,13 @@ const filterInactiveSubscribers = async (message) => {
                 'Mobile Number': row.mobileno || '',
                 'Expiry': row.expiry || '',
                 'Date': currentDate,
-                'District': '',
-                'Marketing Team': '',
-                'Marketing Team No.': '',
+                'District': partnerDetails ? partnerDetails['District'] : '',
+                'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
+                'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
                 'Conversation Remark': '',
                 'Final Remark': ''
             };
-
-            // Add district and marketing details from ANP mapping
-            const partnerId = Object.keys(anpMapping).find(id => 
-                anpMapping[id]['Partner Name'] && 
-                anpMapping[id]['Partner Name'].toLowerCase() === partnerName.toLowerCase()
-            );
-
-            if (partnerId && anpMapping[partnerId]) {
-                cleanRow['District'] = anpMapping[partnerId]['District'] || '';
-                cleanRow['Marketing Team'] = anpMapping[partnerId]['Marketing Team'] || '';
-                cleanRow['Marketing Team No.'] = anpMapping[partnerId]['Marketing Team No.'] || '';
-            }
+            // --- END OF ENRICHMENT LOGIC ---
 
             filteredData.push(cleanRow);
         }
@@ -2180,7 +2168,6 @@ const filterInactiveSubscribers = async (message) => {
             const media = MessageMedia.fromFilePath(filePath);
             await chat.sendMessage(media, { caption: 'Filtered Inactive Subscribers' });
             
-            // Clean up file after 5 seconds
             setTimeout(() => {
                 try { fs.unlinkSync(filePath); } catch {}
             }, 5000);
@@ -2268,7 +2255,7 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
     }
 
     const { userCodes } = session;
-    const userDataMap = await loadUserDataFromExcel();
+    const userDataMap = userDataCacheByFile['AllData'];
 
     for (const userCode of userCodes) {
         try {
@@ -2648,54 +2635,7 @@ const handleSubmittedForm = async (link, oltabid, cookies, username, originalMes
     }
   };
 
-const loadSubscriberData = (filename = 'Subscribers.xlsx') => {
-    if (subscriberDataCache) return subscriberDataCache;
 
-    try {
-        const filePath = path.join(__dirname, filename);
-        if (!fs.existsSync(filePath)) {
-            console.error(`Error: ${filename} not found.`);
-            subscriberDataCache = new Map();
-            return subscriberDataCache;
-        }
-
-        const workbook = XLSX.readFile(filePath);
-        const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(sheet);
-
-        subscriberDataCache = new Map();
-
-        for (const row of rows) {
-            const subscriberId = normalize(row['Subscriber']);
-            const username = normalize(row['Username']);
-
-            const subscriberDetails = {
-                'Subscriber ID': row['Subscriber ID'],
-                'Username': row['Username'],
-                'ANP ID': row['ANP ID'],
-                'ANP Name': row['ANP Name'],
-                'District': row['District'],
-                'Cluster': row['Cluster'],
-                'Stack VLAN': row['Stack VLAN'],
-                'Customer VLAN': row['Customer VLAN'],
-                'JH Code': row['JH Code'],
-                'Subscriber Count': row['Subscriber Count'],
-                'Port': row['Port'],
-                'Backup Port': row['Backup Port'],
-                'BNG': row['BNG'],
-                'Marketing Team': row['Marketing Team Name'],
-                'Marketing Team No.': row['Marketing Team No.'],
-            };
-
-            if (subscriberId) subscriberDataCache.set(subscriberId, subscriberDetails);
-            if (username) subscriberDataCache.set(username, subscriberDetails);
-        }
-        return subscriberDataCache;
-    } catch (err) {
-        console.error(`Error reading subscriber data from Excel: ${err.message}`);
-        return new Map();
-    }
-};
 
 const processInBatches = async (items, asyncFn, batchSize = 15) => {
     let results = [];
@@ -2740,7 +2680,7 @@ const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
         
         const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
 
-        const extraDetails = loadPartnerLiveDetails();
+        const extraDetails = partnerLiveDetailsCache;
         const currentProblemPartners = new Map();
         const recoveredPartners = [];
 
@@ -2802,14 +2742,15 @@ const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
                 const details = extraDetails[p.id] || {};
                 const liveSubsDisplay = p.live_subs === 'Error' ? 'ERROR' : p.live_subs;
                 let msg = `*Detected: Partner Link-Down 🎟️*\n\n` +
-                    `*Name:* ${p.name}\n` +
-                    `*District:* ${details['District'] || 'Not Found'}\n` +
-                    `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n` +
-                    `*Contact:* ${details['Contact No'] || 'Not Found'}\n` +
-                    `*VLAN (S/C):* ${details['Stack VLAN'] || 'Not Found'} / ${details['Customer VLAN'] || 'Not Found'}\n` +
-                    `*JH Code:* ${details['JH Code'] || 'Not Found'}\n` +
-                    `*Port:* ${details['Primary Port'] || 'Not Found'}\n` +
-                    `*BNG:* ${details['BNG'] || 'Not Found'}`;
+                `*Name:* ${p.name}\n` +
+                `*District:* ${details['District'] || 'Not Found'}\n` +
+                `*Subscriber:* ${liveSubsDisplay} / ${p.total_subs}\n\n` +
+                `*ANP Contact:* ${details['ANP Contact No'] || 'Not Found'}\n` +
+                `*Tech Contact:* ${details['Technical Team No.'] || 'Not Found'} (${details['Technical Team'] || 'N/A'})\n\n` +
+                `*VLAN (S/C):* ${details['Stack VLAN'] || 'Not Found'} / ${details['Customer VLAN'] || 'Not Found'}\n` +
+                `*JH Code:* ${details['JH Code'] || 'Not Found'}\n` +
+                `*Port:* ${details['Primary Port'] || 'Not Found'}\n` +
+                `*BNG:* ${details['BNG'] || 'Not Found'}`;
                 
                 await sendAnpAlert(msg, details); 
                 await new Promise(resolve => setTimeout(resolve, 100));
@@ -2858,26 +2799,7 @@ const getLiveOnlineCount = async (partnerId, nmsCookie) => {
     }
 };
 
-const loadPartnerLiveDetails = (filename = ANP_CONFIG.EXCEL_FILE_NAME) => {
-    if (partnerLiveDetailsCache) return partnerLiveDetailsCache;
-    try {
-        const filePath = path.join(__dirname, filename);
-        if (!fs.existsSync(filePath)) {
-            return (partnerLiveDetailsCache = {});
-        }
-        const workbook = XLSX.readFile(filePath);
-        const data = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
-        const detailsDict = {};
-        data.forEach(row => {
-            const partnerId = row['Partner ID'] ? String(row['Partner ID']).trim() : null;
-            if (partnerId) detailsDict[partnerId] = row;
-        });
-        return (partnerLiveDetailsCache = detailsDict);
-    } catch (e) {
-        console.error(`ANP Checker ERROR: Failed to load Excel file '${filename}'.`);
-        return (partnerLiveDetailsCache = {});
-    }
-};
+
 
 const handleIncomingMessage = async (message) => {
     try {
@@ -2894,13 +2816,14 @@ const handleIncomingMessage = async (message) => {
         console.log(`User Detail: ${userIdentifier}`);
         console.log(`Message: ${rawBody}`);
 
-        const replyMatch = rawBody.match(/^@(\d{7,})\s+(.+)/s);
+        const replyMatch = rawBody.match(/^\$(\d{7,})\s+(.+)/s);
         if (replyMatch) {
-            const ticketId = replyMatch[1];
-            const replyContent = replyMatch[2];
-            await handleTicketReply(message, ticketId, replyContent);
-            return; // Important: stops the rest of the function
+        const ticketId = replyMatch[1];
+        const replyContent = replyMatch[2];
+        await handleTicketReply(message, ticketId, replyContent);
+        return; // Important: stops the rest of the function
         }
+
 
         const SESSION_TIMEOUT_MS = 300000;
         const EXECUTION_DELAY_MS = 1300;
@@ -3012,7 +2935,7 @@ const handleIncomingMessage = async (message) => {
         return;
         }
 
-        if (messageBodyNoSpaces.includes('inactivefilter')) {
+        if (messageBodyNoSpaces.includes('grabfilter')) {
         await filterInactiveSubscribers(message);
         return;
         }
