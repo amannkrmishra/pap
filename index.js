@@ -1913,7 +1913,44 @@ async function checkSessionStatus(subscriberCode) {
     }
 }
 
-// Simplified Active Filter - REBUILT WITH LOGIC FROM MainForm.cs
+// New helper function to reliably parse DD-MM-YYYY date strings from the portal CSV
+const parseDateFromString = (dateString) => {
+    if (!dateString || typeof dateString !== 'string') {
+        return null;
+    }
+    const datePart = dateString.split(' ')[0];
+    const parts = datePart.split(/[-/]/);
+    if (parts.length !== 3) { return null; }
+    const day = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10);
+    const year = parseInt(parts[2], 10);
+    if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
+        const date = new Date(year, month - 1, day);
+        if (!isNaN(date.getTime())) {
+            return date;
+        }
+    }
+    return null;
+};
+
+// New helper function to correctly format values for CSV based on their type
+const formatCsvCell = (value) => {
+    if (value === null || typeof value === 'undefined') {
+        return '';
+    }
+    let formattedValue;
+    if (value instanceof Date && !isNaN(value)) {
+        const year = value.getFullYear();
+        const month = (value.getMonth() + 1).toString().padStart(2, '0');
+        const day = value.getDate().toString().padStart(2, '0');
+        formattedValue = `${year}-${month}-${day}`;
+    } else {
+        formattedValue = value.toString();
+    }
+    return formattedValue.includes(',') ? `"${formattedValue}"` : formattedValue;
+};
+
+// Simplified Active Filter - REBUILT WITH CORRECT DATE PARSING
 const filterActiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
@@ -1927,66 +1964,36 @@ const filterActiveSubscribers = async (message) => {
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
-        // Set date range for active report
         await axios.post('https://jh.railwire.co.in/ajx_datatables/sub_activesearch', 
-            new URLSearchParams({
-                'partnerid': 'All',
-                'railwire_test_name': cookies.railwireCookie.value,
-                'st': fromDate,
-                'ed': toDate
-            }), {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': cookieString,
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-        });
+            new URLSearchParams({ 'partnerid': 'All', 'railwire_test_name': cookies.railwireCookie.value, 'st': fromDate, 'ed': toDate }), 
+            { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookieString, 'X-Requested-With': 'XMLHttpRequest' } }
+        );
 
-        // Download CSV
         const response = await axios.get('https://jh.railwire.co.in/billcntl/activesubreport', {
-            headers: { 'Cookie': cookieString },
-            responseType: 'text'
+            headers: { 'Cookie': cookieString }, responseType: 'text'
         });
 
-        // Parse CSV data
         const lines = response.data.split('\n').filter(line => line.trim());
         if (lines.length < 2) {
             await chat.sendMessage("No data found in the report.");
             return;
         }
-
         const headers = parseCSVLine(lines[0]);
-        
-        // Process and filter data
         const filteredData = [];
         let removedForBalance = 0;
         let removedForPackage = 0;
-        const currentDate = new Date().toLocaleDateString('en-US', {
-            weekday: 'long',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-        });
+        const currentDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
         for (let i = 1; i < lines.length; i++) {
             const values = parseCSVLine(lines[i]);
             if (values.length < headers.length) continue;
-
             const row = {};
-            headers.forEach((header, index) => {
-                row[header.toLowerCase()] = values[index] || '';
-            });
-
+            headers.forEach((header, index) => { row[header.toLowerCase()] = values[index] || ''; });
             const packageName = row.packagename || '';
             const balance = parseFloat(row.balance || '0');
             const partnerName = row.partnercompanyname || '';
 
-            // --- FILTERING LOGIC FROM C# APP ---
-            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
-                removedForPackage++;
-                continue;
-            }
-            if (/\s+x\d+$/i.test(packageName)) {
+            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase() || /\s+x\d+$/i.test(packageName)) {
                 removedForPackage++;
                 continue;
             }
@@ -1994,64 +2001,44 @@ const filterActiveSubscribers = async (message) => {
                 removedForBalance++;
                 continue;
             }
-            // --- END OF FILTERING LOGIC ---
-
-            // --- DATA ENRICHMENT (VLOOKUP) LOGIC FROM C# APP ---
             const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
             
             const cleanRow = {
-                'Subscriber ID': row.subscriberid || '',
-                'Username': row.username || '',
-                'Status': row.status || '',
-                'Registration Date': row.registrationdate || '',
-                'Partner Name': partnerName,
-                'Expiry': row.expiry || '',
-                'Date': currentDate,
+                'Subscriber ID': row.subscriberid || '', 'Username': row.username || '', 'Status': row.status || '',
+                'Registration Date': parseDateFromString(row.registrationdate),
+                'Partner Name': partnerName, 'Expiry': row.expiry || '', 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
-                'Mobile Number': row.mobileno || '',
-                'Package Name': packageName,
-                'Balance': row.balance || '',
-                'Conversation Remark': '',
-                'Final Remark': ''
+                'Mobile Number': row.mobileno || '', 'Package Name': packageName, 'Balance': row.balance || '',
+                'Conversation Remark': '', 'Final Remark': ''
             };
-            // --- END OF ENRICHMENT LOGIC ---
-
             filteredData.push(cleanRow);
         }
 
-        // Create summary
         const summary = `Active Filter Results:\n\n` +
                        `Total rows processed: ${lines.length - 1}\n` +
                        `Rows kept: ${filteredData.length}\n` +
                        `Removed (Balance > 100): ${removedForBalance}\n` +
                        `Removed (Package Filter): ${removedForPackage}`;
-
         await chat.sendMessage(summary);
 
-        // Create and send CSV file
         if (filteredData.length > 0) {
             const csvContent = createActiveCSV(filteredData);
             const fileName = `${new Date().toISOString().split('T')[0]}_Active_Filtered.csv`;
             const filePath = path.join(__dirname, fileName);
             fs.writeFileSync(filePath, csvContent);
-            
             const media = MessageMedia.fromFilePath(filePath);
             await chat.sendMessage(media, { caption: 'Filtered Active Subscribers' });
-            
-            setTimeout(() => {
-                try { fs.unlinkSync(filePath); } catch {}
-            }, 5000);
+            setTimeout(() => { try { fs.unlinkSync(filePath); } catch {} }, 5000);
         }
-
     } catch (error) {
         console.error('Error in filterActiveSubscribers:', error.message);
         await chat.sendMessage("Error processing active filter: " + error.message);
     }
 };
 
-// Inactive Filter - REBUILT WITH LOGIC FROM MainForm.cs
+// Inactive Filter - REBUILT WITH CORRECT DATE PARSING
 const filterInactiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
@@ -2066,15 +2053,10 @@ const filterInactiveSubscribers = async (message) => {
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
         await axios.get(`https://jh.railwire.co.in/billcntl/submngisub/${fromDate}/${toDate}/All`, {
-            headers: {
-                'Cookie': cookieString,
-                'X-Requested-With': 'XMLHttpRequest'
-            }
+            headers: { 'Cookie': cookieString, 'X-Requested-With': 'XMLHttpRequest' }
         });
-
         const response = await axios.get('https://jh.railwire.co.in/billcntl/inactivesubreport', {
-            headers: { 'Cookie': cookieString },
-            responseType: 'text'
+            headers: { 'Cookie': cookieString }, responseType: 'text'
         });
 
         const lines = response.data.split('\n').filter(line => line.trim());
@@ -2082,41 +2064,25 @@ const filterInactiveSubscribers = async (message) => {
             await chat.sendMessage("No data found in the report.");
             return;
         }
-
         const headers = parseCSVLine(lines[0]);
-
         const filteredData = [];
         let removedForPackage = 0;
         let removedForCurrentMonth = 0;
-        
         const currentYear = new Date().getFullYear();
         const currentMonth = new Date().getMonth();
-        const currentDate = new Date().toLocaleDateString('en-US', {
-            weekday: 'long',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-        });
+        const currentDate = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
         for (let i = 1; i < lines.length; i++) {
             const values = parseCSVLine(lines[i]);
             if (values.length < headers.length) continue;
-
             const row = {};
-            headers.forEach((header, index) => {
-                row[header.toLowerCase()] = values[index] || '';
-            });
-
+            headers.forEach((header, index) => { row[header.toLowerCase()] = values[index] || ''; });
             const packageName = row.packagename || '';
             const partnerName = row.partnercompanyname || '';
-            const regDate = row.registrationdate ? new Date(row.registrationdate) : null;
-
-            // --- FILTERING LOGIC FROM C# APP ---
-            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
-                removedForPackage++;
-                continue;
-            }
-            if (/\s+x\d+$/i.test(packageName)) {
+            
+            const regDate = parseDateFromString(row.registrationdate);
+            
+            if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase() || /\s+x\d+$/i.test(packageName)) {
                 removedForPackage++;
                 continue;
             }
@@ -2124,62 +2090,43 @@ const filterInactiveSubscribers = async (message) => {
                 removedForCurrentMonth++;
                 continue;
             }
-            // --- END OF FILTERING LOGIC ---
-
-            // --- DATA ENRICHMENT (VLOOKUP) LOGIC FROM C# APP ---
+            
             const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
-
             const cleanRow = {
-                'Subscriber ID': row.subscriberid || '',
-                'Username': row.username || '',
-                'Status': row.status || '',
-                'Registration Date': row.registrationdate || '',
-                'Partner Name': partnerName,
-                'Mobile Number': row.mobileno || '',
-                'Expiry': row.expiry || '',
-                'Date': currentDate,
+                'Subscriber ID': row.subscriberid || '', 'Username': row.username || '', 'Status': row.status || '',
+                'Registration Date': regDate,
+                'Partner Name': partnerName, 'Mobile Number': row.mobileno || '', 'Expiry': row.expiry || '', 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
-                'Conversation Remark': '',
-                'Final Remark': ''
+                'Conversation Remark': '', 'Final Remark': ''
             };
-            // --- END OF ENRICHMENT LOGIC ---
-
             filteredData.push(cleanRow);
         }
 
-        // Create summary
         const summary = `Inactive Filter Results:\n\n` +
                        `Total rows processed: ${lines.length - 1}\n` +
                        `Rows kept: ${filteredData.length}\n` +
                        `Removed (Package Filter): ${removedForPackage}\n` +
                        `Removed (Current Month): ${removedForCurrentMonth}`;
-
         await chat.sendMessage(summary);
 
-        // Create and send CSV file
         if (filteredData.length > 0) {
             const csvContent = createInactiveCSV(filteredData);
             const fileName = `${new Date().toISOString().split('T')[0]}_Inactive_Filtered.csv`;
             const filePath = path.join(__dirname, fileName);
             fs.writeFileSync(filePath, csvContent);
-            
             const media = MessageMedia.fromFilePath(filePath);
             await chat.sendMessage(media, { caption: 'Filtered Inactive Subscribers' });
-            
-            setTimeout(() => {
-                try { fs.unlinkSync(filePath); } catch {}
-            }, 5000);
+            setTimeout(() => { try { fs.unlinkSync(filePath); } catch {} }, 5000);
         }
-
     } catch (error) {
         console.error('Error in filterInactiveSubscribers:', error.message);
         await chat.sendMessage("Error processing inactive filter: " + error.message);
     }
 };
 
-// Helper function to create Active CSV
+// Helper function to create Active CSV - USES THE NEW FORMATTER
 const createActiveCSV = (data) => {
     const headers = [
         'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
@@ -2189,17 +2136,14 @@ const createActiveCSV = (data) => {
     
     let csv = headers.join(',') + '\n';
     data.forEach(row => {
-        const values = headers.map(header => {
-            const value = row[header] || '';
-            return value.includes(',') ? `"${value}"` : value;
-        });
+        const values = headers.map(header => formatCsvCell(row[header]));
         csv += values.join(',') + '\n';
     });
     
     return csv;
 };
 
-// Helper function to create Inactive CSV
+// Helper function to create Inactive CSV - USES THE NEW FORMATTER
 const createInactiveCSV = (data) => {
     const headers = [
         'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
@@ -2209,15 +2153,13 @@ const createInactiveCSV = (data) => {
     
     let csv = headers.join(',') + '\n';
     data.forEach(row => {
-        const values = headers.map(header => {
-            const value = row[header] || '';
-            return value.includes(',') ? `"${value}"` : value;
-        });
+        const values = headers.map(header => formatCsvCell(row[header]));
         csv += values.join(',') + '\n';
     });
     
     return csv;
 };
+
 
 async function ChangePlan(formData) {
     try {
