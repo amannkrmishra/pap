@@ -1995,18 +1995,21 @@ const filterActiveSubscribers = async (message) => {
             const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
             
             const cleanRow = {
-                'Subscriber ID': row.subscriberid || '', 'Username': row.username || '', 'Status': row.status || '',
-                'Registration Date': parseDateFromString(row.registrationdate),
+                'Subscriber ID': row.subscriberid || '',
+                'Username': row.username || '',
+                'Status': row.status || '',
+                'Registration Date': row.registrationdate || '',
                 'Partner Name': partnerName,
-                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '', // <-- ADDED
-                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',             // <-- ADDED
-                'Expiry': row.expiry || '', 'Date': currentDate,
+                'Expiry': row.expiry || '',
+                'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
-                'Technical Team': partnerDetails ? partnerDetails['Technical Team'] : '',     // <-- ADDED
-                'Technical Team No.': partnerDetails ? partnerDetails['Technical Team No.'] : '', // <-- ADDED
-                'Mobile Number': row.mobileno || '', 'Package Name': packageName, 'Balance': row.balance || ''
+                'Mobile Number': row.mobileno || '',
+                'Package Name': packageName,
+                'Balance': row.balance || '',
+                'Conversation Remark': '',
+                'Final Remark': ''
             };
             // --- END OF ENRICHMENT LOGIC ---
 
@@ -2116,17 +2119,19 @@ const filterInactiveSubscribers = async (message) => {
             const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
 
             const cleanRow = {
-                'Subscriber ID': row.subscriberid || '', 'Username': row.username || '', 'Status': row.status || '',
-                'Registration Date': regDate,
+                'Subscriber ID': row.subscriberid || '',
+                'Username': row.username || '',
+                'Status': row.status || '',
+                'Registration Date': row.registrationdate || '',
                 'Partner Name': partnerName,
-                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '', // <-- ADDED
-                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',             // <-- ADDED
-                'Mobile Number': row.mobileno || '', 'Expiry': row.expiry || '', 'Date': currentDate,
+                'Mobile Number': row.mobileno || '',
+                'Expiry': row.expiry || '',
+                'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
-                'Technical Team': partnerDetails ? partnerDetails['Technical Team'] : '',     // <-- ADDED
-                'Technical Team No.': partnerDetails ? partnerDetails['Technical Team No.'] : '' // <-- ADDED
+                'Conversation Remark': '',
+                'Final Remark': ''
             };
             // --- END OF ENRICHMENT LOGIC ---
 
