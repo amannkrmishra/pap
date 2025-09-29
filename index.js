@@ -600,17 +600,15 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
             const anpName = normalize(row['ANP Name']);
             const jhCode = normalize(row['JH Code']);
 
-            // --- VLOOKUP CACHE POPULATION ---
             // Create the lookup map keyed by Partner Name for filtering functions
             if (anpName && !partnerNameLookupCache.has(anpName)) {
                 partnerNameLookupCache.set(anpName, {
                     'District': row['District'],
+                    'Cluster': row['Cluster'],
                     'Marketing Team': row['Marketing Team'],
                     'Marketing Team No.': row['Marketing Team No.']
                 });
             }
-            // ------------------------------------
-
             // 1. Populate subscriberDataCache and portalUsersCache
             if (username || subscriberId) {
                  const subscriberDetails = {
