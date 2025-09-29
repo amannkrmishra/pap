@@ -2779,7 +2779,7 @@ const getLiveOnlineCount = async (partnerId, nmsCookie) => {
 const handleIncomingMessage = async (message) => {
     try {
         const chat = await message.getChat();
-        const ignoredGroupNames = ['Railtel & MSP team Jharkhand', 'Railwire - Dhanbad Zone'];
+        const ignoredGroupNames = ['Railtel & MSP team Jharkhand', 'Railwire-Jharkhand-Tech'];
         if (chat.isGroup && ignoredGroupNames.includes(chat.name)) {
             return;
         }
