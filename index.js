@@ -1365,7 +1365,7 @@ const handleSubscriberSearch = async (message, searchTerm) => {
         await chat.sendMessage(reply);
     } else {
         // If no match is found, inform the user
-        await chat.sendMessage(`❌ No subscriber found for "${searchTerm}".`);
+        await chat.sendMessage(`No subscriber found for "${searchTerm}".`);
     }
 };
 
