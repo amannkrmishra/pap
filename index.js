@@ -1347,7 +1347,7 @@ const handleSubscriberSearch = async (message, searchTerm) => {
         let reply = `*Subscriber Details*\n\n`;
         reply += `*Subscriber ID:* ${result['Subscriber ID'] || 'N/A'}\n`;
         reply += `*Username:* ${result['Username'] || 'N/A'}\n`;
-        reply += `*Subscriber Mobile:* ${result['Subscriber Mobile'] || 'N/A'}\n`;
+        reply += `*MobileNo:* ${result['MobileNo'] || 'N/A'}\n`;
         reply += `*ANP ID:* ${result['ANP ID'] || 'N/A'}\n`;
         reply += `*ANP Name:* ${result['ANP Name'] || 'N/A'}\n`;
         reply += `*District:* ${result['District'] || 'N/A'}\n`;
