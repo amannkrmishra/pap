@@ -3312,14 +3312,14 @@ client.on('ready', async () => {
 
 // -- Handler for displaying the QR code on startup --
 
-client.on('qr', generateQRCode);
-
 const generateQRCode = (qr) => {
     console.log('Scan the QR code below to login:');
     qrcode.generate(qr, {
         small: true
     });
 };
+
+client.on('qr', generateQRCode);
 
 // -- Handler for incoming messages --
 
