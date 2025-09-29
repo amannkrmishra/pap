@@ -1347,9 +1347,11 @@ const handleSubscriberSearch = async (message, searchTerm) => {
         let reply = `*Subscriber Details*\n\n`;
         reply += `*Subscriber ID:* ${result['Subscriber ID'] || 'N/A'}\n`;
         reply += `*Username:* ${result['Username'] || 'N/A'}\n`;
+        reply += `*Subscriber No.:* ${result['Subscriber Mobile'] || 'N/A'}\n`;
         reply += `*ANP ID:* ${result['ANP ID'] || 'N/A'}\n`;
         reply += `*ANP Name:* ${result['ANP Name'] || 'N/A'}\n`;
         reply += `*District:* ${result['District'] || 'N/A'}\n`;
+        reply += `*Cluster:* ${result['Cluster'] || 'N/A'}\n`;
         reply += `*Stack VLAN:* ${result['Stack VLAN'] || 'N/A'}\n`;
         reply += `*Customer VLAN:* ${result['Customer VLAN'] || 'N/A'}\n`;
         reply += `*JH Code:* ${result['JH Code'] || 'N/A'}\n`;
