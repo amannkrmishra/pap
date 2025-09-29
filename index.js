@@ -2903,12 +2903,12 @@ const handleIncomingMessage = async (message) => {
         }
 
         // Add these to your handleIncomingMessage function:
-        if (messageBodyNoSpaces.includes('activefilter')) {
+        if (messageBodyNoSpaces.includes('chalufilter')) {
         await filterActiveSubscribers(message);
         return;
         }
 
-        if (messageBodyNoSpaces.includes('inactivefilter')) {
+        if (messageBodyNoSpaces.includes('bandfilter')) {
         await filterInactiveSubscribers(message);
         return;
         }
@@ -3098,3 +3098,4 @@ client.on('message', (message) => {
 
 
 client.initialize();
+
