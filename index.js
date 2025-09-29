@@ -1347,7 +1347,7 @@ const handleSubscriberSearch = async (message, searchTerm) => {
         let reply = `*Subscriber Details*\n\n`;
         reply += `*Subscriber ID:* ${result['Subscriber ID'] || 'N/A'}\n`;
         reply += `*Username:* ${result['Username'] || 'N/A'}\n`;
-        reply += `*Subscriber No.:* ${result['Subscriber Mobile'] || 'N/A'}\n`;
+        reply += `*Subscriber Mobile:* ${result['Subscriber Mobile'] || 'N/A'}\n`;
         reply += `*ANP ID:* ${result['ANP ID'] || 'N/A'}\n`;
         reply += `*ANP Name:* ${result['ANP Name'] || 'N/A'}\n`;
         reply += `*District:* ${result['District'] || 'N/A'}\n`;
@@ -1915,21 +1915,16 @@ async function checkSessionStatus(subscriberCode) {
     }
 }
 
-// Simplified Active Filter - REBUILT WITH LOGIC FROM MainForm.cs
 const filterActiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
-        await chat.sendMessage("Enter FROM date (YYYY-MM-DD):");
-        const fromDate = (await waitForReply(message)).body.trim();
-        await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
-        const toDate = (await waitForReply(message)).body.trim();
-        
-        await chat.sendMessage("Downloading active report and processing...");
-        
+        await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
+        const fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
+        const toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
-        // Set date range for active report
         await axios.post('https://jh.railwire.co.in/ajx_datatables/sub_activesearch', 
             new URLSearchParams({
                 'partnerid': 'All',
@@ -2005,6 +2000,7 @@ const filterActiveSubscribers = async (message) => {
                 'Partner Name': partnerName,
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
+                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
                 'Mobile Number': row.mobileno || '',
@@ -2046,17 +2042,13 @@ const filterActiveSubscribers = async (message) => {
     }
 };
 
-// Inactive Filter - REBUILT WITH LOGIC FROM MainForm.cs
 const filterInactiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
-        await chat.sendMessage("Enter FROM date (YYYY-MM-DD):");
-        const fromDate = (await waitForReply(message)).body.trim();
-        await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
-        const toDate = (await waitForReply(message)).body.trim();
-        
-        await chat.sendMessage("Downloading inactive report and processing...");
-        
+        await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
+        const fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
+        const toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
@@ -2086,7 +2078,7 @@ const filterInactiveSubscribers = async (message) => {
         
         const currentYear = new Date().getFullYear();
         const currentMonth = new Date().getMonth();
-        const currentDate = new Date().toLocaleDateString('en-GB').replace(/\//g, '-'); // Formats as DD-MM-YYYY
+        const currentDate = new Date().toLocaleDateString('en-GB').replace(/\//g, '-');
         for (let i = 1; i < lines.length; i++) {
             const values = parseCSVLine(lines[i]);
             if (values.length < headers.length) continue;
@@ -2100,7 +2092,6 @@ const filterInactiveSubscribers = async (message) => {
             const partnerName = row.partnercompanyname || '';
             const regDate = row.registrationdate ? new Date(row.registrationdate) : null;
 
-            // --- FILTERING LOGIC FROM C# APP ---
             if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
                 removedForPackage++;
                 continue;
@@ -2113,9 +2104,7 @@ const filterInactiveSubscribers = async (message) => {
                 removedForCurrentMonth++;
                 continue;
             }
-            // --- END OF FILTERING LOGIC ---
 
-            // --- DATA ENRICHMENT (VLOOKUP) LOGIC FROM C# APP ---
             const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
 
             const cleanRow = {
@@ -2128,10 +2117,10 @@ const filterInactiveSubscribers = async (message) => {
                 'Mobile Number': row.mobileno || '',
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
+                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : ''
             };
-            // --- END OF ENRICHMENT LOGIC ---
 
             filteredData.push(cleanRow);
         }
@@ -2166,18 +2155,17 @@ const filterInactiveSubscribers = async (message) => {
     }
 };
 
-// --- AFTER (FIXED) ---
+
 const createActiveCSV = (data) => {
-    const headers = [
-        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
-        'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number', 'Package Name',
-        'Balance', 'Conversation Remark', 'Final Remark'
-    ];
+const headers = [
+    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
+    'District', 'Cluster', 'Marketing Team', 'Marketing Team No.', 'Mobile Number', 'Package Name',
+    'Balance', 'Conversation Remark', 'Final Remark'
+];
     
     let csv = headers.join(',') + '\n';
     data.forEach(row => {
         const values = headers.map(header => {
-            // Convert value to string BEFORE using .includes()
             const stringValue = (row[header] || '').toString(); 
             return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
         });
@@ -2187,18 +2175,16 @@ const createActiveCSV = (data) => {
     return csv;
 };
 
-// --- AFTER (FIXED) ---
 const createInactiveCSV = (data) => {
-    const headers = [
-        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
-        'Date', 'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number',
-        'Conversation Remark', 'Final Remark'
-    ];
+const headers = [
+    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
+    'Date', 'District', 'Cluster', 'Marketing Team', 'Marketing Team No.', 'Mobile Number',
+    'Conversation Remark', 'Final Remark'
+];
     
     let csv = headers.join(',') + '\n';
     data.forEach(row => {
         const values = headers.map(header => {
-            // Convert value to string BEFORE using .includes()
             const stringValue = (row[header] || '').toString();
             return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
         });
