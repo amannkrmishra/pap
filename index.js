@@ -729,10 +729,6 @@ const getSubscriberCount = async () => {
     }
 };
 
-
-
-
-
 const handleSubscriberUpdate = async (message) => {
     const chat = await message.getChat();
     try {
@@ -746,10 +742,12 @@ const handleSubscriberUpdate = async (message) => {
         const userDataMap = userDataCacheByFile['AllData'];
         const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
 
-        if (!userData || !userData['Subscriber ID']) {
+        if (!userData || (!userData['Subscriber ID'] && !userData.SubscriberId)) { // Check for both keys
             await chat.sendMessage(`Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
             return;
         }
+
+        const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
 
         await chat.sendMessage(`Found: *${userData.Username}*\n\nInput New Phone Number:`);
         const phoneMessage = await waitForReply(message);
@@ -767,11 +765,16 @@ const handleSubscriberUpdate = async (message) => {
             return;
         }
 
-        const cookies = sessionCache;
+        const cookies = sessionCache; // Using your desired method
+        if (!cookies) {
+            await chat.sendMessage("❌ Authentication session not found. The bot might need to restart.");
+            return;
+        }
+
         const payload = new URLSearchParams({
             'cnumber': newPhoneNumber,
             'cemail': newEmail,
-            'id': userData['Subscriber ID'],
+            'id': subscriberId, // Use the corrected, safe variable
             'railwire_test_name': cookies.railwireCookie.value
         });
         const config = {
@@ -791,8 +794,12 @@ const handleSubscriberUpdate = async (message) => {
         }
 
     } catch (error) {
-        console.error("Error during subscriber update after retries:", error.message);
-        await chat.sendMessage("An unexpected error occurred during the update process.");
+        console.error("Error during subscriber update:", error.message);
+        if (error.message.includes('railwire_test_name')) {
+             await chat.sendMessage("❌ Update failed. The session has likely expired. Please try the command again.");
+        } else {
+             await chat.sendMessage("❌ An unexpected error occurred during the update process.");
+        }
     }
 };
 
@@ -808,10 +815,21 @@ const handleBulkSubscriberUpdate = async (message) => {
     }
     const { userCodes } = session;
 
+    const cookies = sessionCache; // Using your desired method
+    if (!cookies) {
+        await chat.sendMessage("❌ Authentication session not found. The bot might need to restart.");
+        userSessions.delete(userIdentifier);
+        return;
+    }
+
     for (const userCode of userCodes) {
         try {
             const userData = await fetchUserDataFromPortal(userCode);
-            const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
+            
+            // --- PAYLOAD FIX IS HERE ---
+            // This function ONLY gets live data, so the key is always "SubscriberId".
+            const subscriberId = userData ? userData.SubscriberId : null;
+
             if (!subscriberId || !userData.Username) {
                 await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
                 continue;
@@ -820,24 +838,23 @@ const handleBulkSubscriberUpdate = async (message) => {
             const newPhoneNumber = generateRandomMobile();
             const newEmail = generateRandomEmail(userData.Username);
 
-            const cookies = sessionCache;
             const payload = new URLSearchParams({
                 'cnumber': newPhoneNumber,
                 'cemail': newEmail,
-                'id': userData['Subscriber ID'],
+                'id': subscriberId, // Use the corrected key
                 'railwire_test_name': cookies.railwireCookie.value
             });
             const config = {
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`
                 }
             };
             const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
             const responseData = response.data;
 
             if (responseData && responseData.STATUS === "OK") {
-            let reply = `*Username:* ${userData.Username}\n`;
+                let reply = `*Username:* ${userData.Username}\n`;
                 reply += `*Mobile No.:* ${newPhoneNumber}\n`;
                 reply += `*Email ID:* ${newEmail}\n\n`;
                 reply += `Details have been updated successfully.`;
@@ -847,15 +864,14 @@ const handleBulkSubscriberUpdate = async (message) => {
                 await chat.sendMessage(`Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
             }
         } catch (error) {
-            console.error(`Error during bulk update for ${userCode} after retries:`, error.message);
+            console.error(`Error during bulk update for ${userCode}:`, error.message);
             await chat.sendMessage(`An error occurred while processing *${userCode}*.`);
         }
-        await new Promise(resolve => setTimeout(resolve, 10));
+        await new Promise(resolve => setTimeout(resolve, 150));
     }
     userSessions.delete(userIdentifier);
     await chat.sendMessage("Bulk update process finished.");
 };
-
 
 const baseURL = 'https://jh.railwire.co.in';
 const mainURL = `${baseURL}/billcntl/kycpending`;
@@ -1449,7 +1465,9 @@ const checkComplaintStatus = async (message) => {
 
 const handleAnpUpdate = async (message) => {
     const chat = await message.getChat();
+
     try {
+        // Part 1 & 2: Find the ANP and gather new info (This part is correct and unchanged)
         await chat.sendMessage("Enter Partner Name or ID:");
         const searchTerm = (await waitForReply(message)).body.trim();
         if (!searchTerm) {
@@ -1460,65 +1478,48 @@ const handleAnpUpdate = async (message) => {
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         const listUrl = `${baseURL}/billcntl/billpartners`;
-        const listResponse = await axios.get(listUrl, { headers: { 'Cookie': cookieString } });
+
+        const listResponse = await axios.get(listUrl, {
+            headers: {
+                'Cookie': cookieString
+            }
+        });
         const $ = cheerio.load(listResponse.data);
-        let foundMatch = null;
+
+        let match = null;
         let multipleMatches = [];
         const normalizedSearch = normalize(searchTerm);
-        $('table#dynamic-table tbody tr').each(function () {
+
+        $('table#dynamic-table tbody tr').each(function() {
             const row = $(this);
             const partnerId = normalize(row.find('td').eq(0).text());
             const companyName = normalize(row.find('td').eq(1).find('a').text());
+
             if (partnerId === normalizedSearch || companyName === normalizedSearch) {
-                multipleMatches.push({
+                const foundMatch = {
                     name: row.find('td').eq(1).find('a').text().trim(),
                     id: row.find('td').eq(0).text().trim(),
                     link: row.find('td').eq(1).find('a').attr('href')
-                });
+                };
+                multipleMatches.push(foundMatch);
             }
         });
 
         if (multipleMatches.length === 0) {
-            await chat.sendMessage(`No ANP found matching "${searchTerm}".`);
+            await chat.sendMessage(`❌ No ANP found matching "${searchTerm}".`);
             return;
-        }
-        if (multipleMatches.length > 1) {
-            await chat.sendMessage(`Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
+        } else if (multipleMatches.length > 1) {
+            await chat.sendMessage(`❌ Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
             return;
+        } else {
+            match = multipleMatches[0];
         }
-        foundMatch = multipleMatches[0];
-
-        const detailUrl = baseURL + foundMatch.link;
-        const detailResponse = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
-        const $$ = cheerio.load(detailResponse.data);
-        const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
-        const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
-        const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
-        let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
-        let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
-
-        const payloadData = {
-            'railwire_test_name': cookies.railwireCookie.value,
-            'partnerid': scrapeHidden('partnerid'), 'cname': scrapeValue("Company Name"), 'cregno': scrapeValue("Company Registration Number"),
-            'caddress': scrapeHtml('caddress'), 'cmanager': scrapeValue("Contact Person"), 'agreementdate': scrapeValue("Railwire Agreement Date"),
-            'agreementno': scrapeValue("Railwire Agreement No"), 'pancard': scrapeHidden('pancard'), 'bank_acholder': scrapeValue("Bank Account Holder Name"),
-            'bank_actype': scrapeValue("Bank Account Type"), 'bank_name': scrapeHtml('bank_name'), 'bank_branch': scrapeHtml('bank_branch'),
-            'bank_acno': scrapeValue("Bank Account No"), 'bank_ifsc': scrapeHidden('bank_ifsc'), 'gstin': gstin, 'sacno': scrapeValue("SAC No"),
-            'ptype': scrapeHtml('ptype'), 'gst_status': scrapeHidden("gststatus1"), 'legalname': scrapeHidden("legalnameval"),
-            'tradename': scrapeHidden("tradenameval"), 'ptnrattid': scrapeHtml('ptnrattid'), 'ptnrlang': scrapeHtml('ptnrlang'),
-            'territory_name': scrapeHidden('territory_name'), 'ring': scrapeValue("Ring"), 'brasip': scrapeValue("BRAS IP"),
-            'switchip': scrapeValue("Switch IP"), 'dropping': scrapeValue("Dropping"), 'interface': scrapeValue("Interface"),
-            'port_number': scrapeValue("Port Number"), 'pop_name': scrapeValue("Pop Name"), 'pop_pincode': scrapeValue("Pop Pin Code"),
-            'ngcomany': scrapeHidden('ngcomany'), 'brmobile': scrapeValue("Bank Registered Mobile No"), 'bremail': scrapeValue("Bank Registered Email ID"),
-            'reject_remark': "", 'onlinesub': "0", 'taxpayertype': 0, 'loc_type': null, 'onrechargeatom': 0, 'bankcheck': '1', 'subonrechargerazorpay': 0
-        };
-        const match = foundMatch;
 
         await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
         const phoneMessage = await waitForReply(message);
         const newPhoneNumber = phoneMessage.body.trim();
         if (!/^\d{10}$/.test(newPhoneNumber)) {
-            await chat.sendMessage("Invalid phone number. Operation canceled.");
+            await chat.sendMessage("❌ Invalid phone number. Operation canceled.");
             return;
         }
 
@@ -1526,7 +1527,7 @@ const handleAnpUpdate = async (message) => {
         const emailMessage = await waitForReply(message);
         const newEmail = emailMessage.body.trim().toLowerCase();
         if (!/\S+@\S+\.\S+/.test(newEmail)) {
-            await chat.sendMessage("Invalid email format. Operation canceled.");
+            await chat.sendMessage("❌ Invalid email format. Operation canceled.");
             return;
         }
 
@@ -1534,39 +1535,137 @@ const handleAnpUpdate = async (message) => {
         const bankReply = await waitForReply(message);
         const updateBankDetails = bankReply.body.trim().toLowerCase() === 'yes';
 
-        const finalPayload = { ...payloadData, cnumber: newPhoneNumber, cemail: newEmail };
-        if (updateBankDetails) {
-            finalPayload.brmobile = newPhoneNumber;
-            finalPayload.bremail = newEmail;
-        }
+        // Part 3: Scrape detail page (This part is correct and unchanged)
+        const detailUrl = baseURL + match.link;
+        const detailResponse = await axios.get(detailUrl, {
+            headers: {
+                'Cookie': cookieString
+            }
+        });
+        const $$ = cheerio.load(detailResponse.data);
 
-        let confirmationMessage = `*Confirm Details*\n_Changes are highlighted in bold._\n\n*Partner ID:* ${finalPayload.partnerid}\n*Company Name:* ${finalPayload.cname}\n*Phone:* *${finalPayload.cnumber}*\n*Email Address:* *${finalPayload.cemail}*\n*Bank Mobile:* ${updateBankDetails ? `*${finalPayload.brmobile}*` : finalPayload.brmobile}\n*Bank Email:* ${updateBankDetails ? `*${finalPayload.bremail}*` : finalPayload.bremail}\n\nCorrect? Type *yes* to submit, or anything else to cancel.`;
+        const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
+        const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
+        const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
+
+        let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
+        let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
+
+        const payload = {
+            'railwire_test_name': cookies.railwireCookie.value,
+            'partnerid': scrapeHidden('partnerid'),
+            'cname': scrapeValue("Company Name"),
+            'cregno': scrapeValue("Company Registration Number"),
+            'caddress': scrapeHtml('caddress'),
+            'cmanager': scrapeValue("Contact Person"),
+            'cnumber': newPhoneNumber,
+            'cemail': newEmail,
+            'agreementdate': scrapeValue("Railwire Agreement Date"),
+            'agreementno': scrapeValue("Railwire Agreement No"),
+            'pancard': scrapeHidden('pancard'),
+            'bank_acholder': scrapeValue("Bank Account Holder Name"),
+            'bank_actype': scrapeValue("Bank Account Type"),
+            'bank_name': scrapeHtml('bank_name'),
+            'bank_branch': scrapeHtml('bank_branch'),
+            'bank_acno': scrapeValue("Bank Account No"),
+            'bank_ifsc': scrapeHidden('bank_ifsc'),
+            'gstin': gstin,
+            'sacno': scrapeValue("SAC No"),
+            'ptype': scrapeHtml('ptype'),
+            'gst_status': scrapeHidden("gststatus1"),
+            'legalname': scrapeHidden("legalnameval"),
+            'tradename': scrapeHidden("tradenameval"),
+            'ptnrattid': scrapeHtml('ptnrattid'),
+            'ptnrlang': scrapeHtml('ptnrlang'),
+            'territory_name': scrapeHidden('territory_name'),
+            'ring': scrapeValue("Ring"),
+            'brasip': scrapeValue("BRAS IP"),
+            'switchip': scrapeValue("Switch IP"),
+            'dropping': scrapeValue("Dropping"),
+            'interface': scrapeValue("Interface"),
+            'port_number': scrapeValue("Port Number"),
+            'pop_name': scrapeValue("Pop Name"),
+            'pop_pincode': scrapeValue("Pop Pin Code"),
+            'ngcomany': scrapeHidden('ngcomany'),
+            'brmobile': updateBankDetails ? newPhoneNumber : scrapeValue("Bank Registered Mobile No"),
+            'bremail': updateBankDetails ? newEmail : scrapeValue("Bank Registered Email ID"),
+            'reject_remark': "",
+            'onlinesub': "0",
+            'taxpayertype': 0,
+            'loc_type': null,
+            'onrechargeatom': 0,
+            'bankcheck': '1',
+            'subonrechargerazorpay': 0
+        };
+
+        // --- Part 4: Display ALL data for confirmation, just like the JS snippet ---
+        let confirmationMessage = `*Confirm Details*\n_Changes are highlighted in bold._\n\n`;
+        confirmationMessage += `*Partner ID:* ${payload.partnerid}\n`;
+        confirmationMessage += `*Company Name:* ${payload.cname}\n`;
+        confirmationMessage += `*Nature of Co:* ${payload.ngcomany}\n`;
+        confirmationMessage += `*Company Reg No:* ${payload.cregno}\n`;
+        confirmationMessage += `*Address:* ${payload.caddress}\n`;
+        confirmationMessage += `*Contact Person:* ${payload.cmanager}\n`;
+        confirmationMessage += `*Phone:* *${payload.cnumber}*\n`;
+        confirmationMessage += `*Email Address:* *${payload.cemail}*\n`;
+        confirmationMessage += `*PAN Card:* ${payload.pancard}\n`;
+        confirmationMessage += `*Agreement Date:* ${payload.agreementdate}\n`;
+        confirmationMessage += `*Agreement No:* ${payload.agreementno}\n`;
+        confirmationMessage += `*Partner Type:* ${payload.ptype}\n`;
+        confirmationMessage += `*Territory:* ${payload.territory_name}\n\n`;
+        confirmationMessage += `--- *GST Details* ---\n`;
+        confirmationMessage += `*GSTIN:* ${payload.gstin}\n`;
+        confirmationMessage += `*GST Legal Name:* ${payload.legalname}\n`;
+        confirmationMessage += `*GST Trade Name:* ${payload.tradename}\n`;
+        confirmationMessage += `*GST Status:* ${payload.gst_status}\n`;
+        confirmationMessage += `*SAC No:* ${payload.sacno}\n\n`;
+        confirmationMessage += `--- *Bank Details* ---\n`;
+        confirmationMessage += `*Bank Holder:* ${payload.bank_acholder}\n`;
+        confirmationMessage += `*Bank Acct Type:* ${payload.bank_actype}\n`;
+        confirmationMessage += `*Bank Name:* ${payload.bank_name}\n`;
+        confirmationMessage += `*Bank Branch:* ${payload.bank_branch}\n`;
+        confirmationMessage += `*Bank Acct No:* ${payload.bank_acno}\n`;
+        confirmationMessage += `*Bank IFSC:* ${payload.bank_ifsc}\n`;
+        confirmationMessage += `*Bank Mobile:* ${updateBankDetails ? `*${payload.brmobile}*` : payload.brmobile}\n`;
+        confirmationMessage += `*Bank Email:* ${updateBankDetails ? `*${payload.bremail}*` : payload.bremail}\n\n`;
+        confirmationMessage += `--- *Technical Details* ---\n`;
+        confirmationMessage += `*Ring:* ${payload.ring}\n`;
+        confirmationMessage += `*BRAS IP:* ${payload.brasip}\n`;
+        confirmationMessage += `*Switch IP:* ${payload.switchip}\n`;
+        confirmationMessage += `*Dropping:* ${payload.dropping}\n`;
+        confirmationMessage += `*Interface:* ${payload.interface}\n`;
+        confirmationMessage += `*Port Number:* ${payload.port_number}\n`;
+        confirmationMessage += `*POP Name:* ${payload.pop_name}\n`;
+        confirmationMessage += `*POP Pincode:* ${payload.pop_pincode}\n`;
+
         await chat.sendMessage(confirmationMessage);
+        await chat.sendMessage("Correct? Type *yes* to submit, or anything else to cancel.");
         const finalConfirmation = await waitForReply(message);
 
+        // --- Part 5: Final Submission (This part is correct and unchanged) ---
         if (finalConfirmation.body.trim().toLowerCase() === 'yes') {
-            const freshCookiesForUpdate = sessionCache;
             const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
-            const response = await axios.post(updateUrl, new URLSearchParams(finalPayload), {
+            const updateResponse = await axios.post(updateUrl, new URLSearchParams(payload), {
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': `${freshCookiesForUpdate.railwireCookie.name}=${freshCookiesForUpdate.railwireCookie.value}; ${freshCookiesForUpdate.ciSessionCookie.name}=${freshCookiesForUpdate.ciSessionCookie.value}`
+                    'Cookie': cookieString
                 }
             });
-            const updateResponse = response.data;
 
-            if (updateResponse && (updateResponse.STATUS === "OK" || updateResponse.STATUS === "BANK VERIFIED")) {
-                await chat.sendMessage(`ANP details updated successfully for *${match.name}*!`);
+            if (updateResponse.data && (updateResponse.data.STATUS === "OK" || updateResponse.data.STATUS === "BANK VERIFIED")) {
+                await chat.sendMessage(`✅ ANP details updated successfully for *${match.name}*!`);
             } else {
-                const errorMsg = updateResponse ? (updateResponse.MESSAGE || updateResponse.STATUS) : "Unknown error";
-                await chat.sendMessage(`Update failed for *${match.name}*. Server response: ${errorMsg}`);
+                const errorMsg = updateResponse.data ? (updateResponse.data.MESSAGE || updateResponse.data.STATUS) : "Unknown error";
+                await chat.sendMessage(`❌ Update failed for *${match.name}*. Server response: ${errorMsg}`);
             }
         } else {
-            await chat.sendMessage("Update canceled by user. No changes were made.");
+            await chat.sendMessage("❌ Update canceled by user. No changes were made.");
+            return;
         }
+
     } catch (error) {
-        console.error("Error during ANP update after retries:", error.message);
-        await chat.sendMessage("An unexpected error occurred during the ANP update process.");
+        console.error("Error during ANP update:", error.message);
+        await chat.sendMessage("❌ An unexpected error occurred during the ANP update process.");
     }
 };
 
@@ -2903,12 +3002,12 @@ const handleIncomingMessage = async (message) => {
         }
 
         // Add these to your handleIncomingMessage function:
-        if (messageBodyNoSpaces.includes('chalufilter')) {
+        if (messageBodyNoSpaces.includes('activefilter')) {
         await filterActiveSubscribers(message);
         return;
         }
 
-        if (messageBodyNoSpaces.includes('bandfilter')) {
+        if (messageBodyNoSpaces.includes('grabfilter')) {
         await filterInactiveSubscribers(message);
         return;
         }
@@ -3096,6 +3195,4 @@ client.on('message', (message) => {
 });
 
 
-
 client.initialize();
-
