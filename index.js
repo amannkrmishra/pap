@@ -2908,7 +2908,7 @@ const handleIncomingMessage = async (message) => {
         return;
         }
 
-        if (messageBodyNoSpaces.includes('grabfilter')) {
+        if (messageBodyNoSpaces.includes('inactivefilter')) {
         await filterInactiveSubscribers(message);
         return;
         }
@@ -3094,6 +3094,7 @@ client.on('message', (message) => {
 
     handleIncomingMessage(message);
 });
+
 
 
 client.initialize();
