@@ -26,7 +26,6 @@ const mainURL = `${baseURL}/billcntl/kycpending`;
 let jhCodeMap = null;
 
 let processedTicketsState = {};
-const userDataCacheByFile = {};
 const downPartnersState = new Map();
 const userSessions = new Map();
 
@@ -259,7 +258,6 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
     jhCodeMap = new Map();
     partnerIndex = new Map();
     partnerNameLookupCache = new Map();
-    const portalUsersCache = new Map(); 
     try {
         const filePath = path.join(__dirname, filename);
         if (!fs.existsSync(filePath)) {
@@ -314,11 +312,9 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
                 
                 if (subscriberId) {
                     subscriberDataCache.set(subscriberId, subscriberDetails);
-                    portalUsersCache.set(subscriberId, subscriberDetails);
                 }
                 if (username) {
                     subscriberDataCache.set(username, subscriberDetails);
-                    portalUsersCache.set(username, subscriberDetails);
                 }
             }
 
@@ -363,7 +359,6 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
                 }
             }
         }
-        userDataCacheByFile['AllData'] = portalUsersCache;
         console.log(`Loaded consolidated data for ${subscriberDataCache.size} subscribers and ${Object.keys(partnerLiveDetailsCache).length} partners.`);
 
     } catch (err) {
@@ -598,6 +593,7 @@ const authenticate = async (username, password) => {
                 baseurl: '',
             });
 
+            console.log('[authenticate] Sending login form data:', { railwire_test_name: railwireTestToken, username, code: captchaText });
             const loginResponse = await axios.post(`${baseURL}/rlogin`, loginFormData.toString(), {
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -749,6 +745,7 @@ const getSubscriberCount = async () => {
 // -- Fetches a subscriber's details (ID, username, mobile, name) from the Railwire billing portal --
 
 async function fetchUserDataFromPortal(userCode) {
+    console.log(`[LiveFetch] User "${userCode}" not in cache. Fetching from portal...`);
     try {
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
@@ -806,6 +803,8 @@ async function fetchUserDataFromPortal(userCode) {
             name: name
         };
 
+        console.log(`[LiveFetch] ${userData ? 'Successfully found' : 'Failed to find'} live data for "${userCode}".`);
+
         return userData ? {
             Username: userData.username,
             MobileNo: userData.mobileNo,
@@ -824,6 +823,8 @@ const resetSession = async (userData) => {
     try {
         const cookies = sessionCache;
         const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
+        console.log(`[resetSession] Sending payload: ${payload}`);
+
         const config = {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -854,6 +855,7 @@ const DeactivateID = async (userData) => {
         const cookies = sessionCache;
         const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
         const payload = `subid=${subscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
+        console.log(`[DeactivateID] Sending payload: ${payload}`);
         const config = {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -882,7 +884,8 @@ const resetPassword = async (userData) => {
             }
         };
         const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
-        const basePayload = `subid=${subscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
+        const basePayload = `subid=${subscriberId}&mobileno=${userData['MobileNo'] || userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
+        console.log(`[resetPassword] Sending payload: ${basePayload}`);
         const [portalRes, pppoeRes] = await Promise.all([
             axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Bill`, config),
             axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Internet`, config)
@@ -916,11 +919,10 @@ const handleSubscriberUpdate = async (message) => {
 
 
         // 2. Fetch user data (Excel first, then live portal as a fallback)
-        const userDataMap = userDataCacheByFile['AllData'];
-        const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
+        const userData = subscriberDataCache.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
 
         // 3. Validate if user was found
-        if (!userData || !userData.SubscriberId) {
+        if (!userData || !(userData['Subscriber ID'] || userData.SubscriberId)) {
             await chat.sendMessage(`❌ Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
             return;
         }
@@ -953,7 +955,7 @@ const handleSubscriberUpdate = async (message) => {
         const payload = new URLSearchParams({
             'cnumber': newPhoneNumber,
             'cemail': newEmail,
-            'id': userData.SubscriberId,
+            'id': userData['Subscriber ID'] || userData.SubscriberId,
             'railwire_test_name': cookies.railwireCookie.value
         });
 
@@ -964,6 +966,7 @@ const handleSubscriberUpdate = async (message) => {
             }
         };
 
+        console.log(`[handleSubscriberUpdate] Sending payload:`, Object.fromEntries(payload));
         const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
 
         // 7. Confirm the result to the user
@@ -1008,9 +1011,9 @@ const handleBulkSubscriberUpdate = async (message) => {
     for (const userCode of userCodes) {
         try {
             // Fetch live user data to get both SubscriberId and Username
-            const userData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
+            const userData = subscriberDataCache.get(userCode) || await fetchUserDataFromPortal(userCode);
 
-            if (!userData || !userData.SubscriberId || !userData.Username) {
+            if (!userData || !(userData['Subscriber ID'] || userData.SubscriberId) || !userData.Username) {
                 await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
                 continue; // Move to the next user in the loop
             }
@@ -1023,7 +1026,7 @@ const handleBulkSubscriberUpdate = async (message) => {
             const payload = new URLSearchParams({
                 'cnumber': newPhoneNumber,
                 'cemail': newEmail,
-                'id': userData.SubscriberId,
+                'id': userData['Subscriber ID'] || userData.SubscriberId,
                 'railwire_test_name': cookies.railwireCookie.value
             });
 
@@ -1034,6 +1037,7 @@ const handleBulkSubscriberUpdate = async (message) => {
                 }
             };
 
+            console.log(`[handleBulkSubscriberUpdate] Sending payload for ${userCode}:`, Object.fromEntries(payload));
             const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
 
             // 5. Send feedback to the user
@@ -1161,6 +1165,7 @@ const handleAnpUpdate = async (message) => {
             return;
         } else {
             match = multipleMatches[0];
+            console.log('[handleAnpUpdate] Found partner match:', match);
         }
 
         await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
@@ -1300,6 +1305,8 @@ const handleAnpUpdate = async (message) => {
                 }
             });
 
+            console.log('[handleAnpUpdate] Sending final ANP update payload:', payload);
+
             if (updateResponse.data && (updateResponse.data.STATUS === "OK" || updateResponse.data.STATUS === "BANK VERIFIED")) {
                 await chat.sendMessage(`✅ ANP details updated successfully for *${match.name}*!`);
             } else {
@@ -1333,6 +1340,7 @@ async function ChangePlan(formData) {
             oldpkgid: formData.oldpkgid,
             railwire_test_name: cookies.railwireCookie.value
         };
+        console.log(`[ChangePlan] Sending payload for ${formData.username}:`, payload);
         const response = await axios.post(url, new URLSearchParams(payload).toString(), {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -1355,8 +1363,8 @@ const handlePlanChange = async (message) => {
     const messageBody = message.body;
 
     const usernamePattern = /jh[\.\w]+/gi;
-    const subscriberIdPattern = /\b\d{5,}\b/g;
-    const packageIdPattern = /\b\d{3,6}\b/g;
+    const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
+    const packageIdPattern = /\b\d{5,6}\b/g;
 
     const usernames = messageBody.match(usernamePattern) || [];
     const subscriberIds = messageBody.match(subscriberIdPattern) || [];
@@ -2030,6 +2038,7 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
                 
                 // Case-insensitive cluster check
                 if (ticketDetails.cluster.toLowerCase() !== 'tatanagar') {
+                    console.log(`[TicketMonitor] Skipping ticket #${ticket.ticketId} - Cluster "${ticketDetails.cluster}" is not Tatanagar.`);
                     console.log(`Skipping ticket #${ticket.ticketId} - Cluster: ${ticketDetails.cluster}`);
                     continue;
                 }
@@ -2078,6 +2087,7 @@ const replyToTicket = async (ticketId, content) => {
         form.append('ticketid', ticketId);
         form.append('content', content);
 
+        console.log(`[replyToTicket] Replying to #${ticketId} with content: "${content}"`);
         const response = await axios.post('https://jh.railwire.co.in/crmcntl/bill_tickreply', form, {
             headers: {
                 ...form.getHeaders(),
@@ -2201,8 +2211,10 @@ const handleTicketActivation = async (message) => {
                 const shouldCheckSession = autoCloseSubjects.some(subject => ticket.subject.includes(subject));
                 if (shouldCheckSession && subscriberId) {
                     const sessionStatus = await checkSessionStatus(subscriberId);
+                    console.log(`[TicketActivation] Checked session for ticket #${ticket.ticketId} (${subscriberId}): Status is ${sessionStatus}.`);
                     if (sessionStatus === 'Active') {
                         const closePayload = new URLSearchParams({ ticketid: ticket.ticketId, response: 'Dear customer, link has been restored.', railwire_test_name: cookies.railwireCookie.value });
+                        console.log(`[handleTicketActivation] Closing ticket #${ticket.ticketId} for subscriber ${subscriberId}`);
                         const closeResponse = await client.post('/crmcntl/close_ticket', closePayload.toString());
                         if (closeResponse.status === 200) {
                             closed++;
@@ -2248,8 +2260,9 @@ const extractUsernamesFromImage = async (message) => {
             .toBuffer();
 
         const { data: { text } } = await Tesseract.recognize( processedImageBuffer, 'eng' );
+        console.log(`[OCR] Raw extracted text: "${text.replace(/\n/g, ' ')}"`);
 
-        const subscriberIdPattern = /\b\d{5}\b/g;
+        const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
         let matches = text.match(subscriberIdPattern) || [];
 
         if (matches.length > 0) {
@@ -2343,6 +2356,8 @@ const createSLATicket = async (message) => {
         form.append('mspid', '11');
         form.append('circle', 'JH');
         form.append('assig_date', 'undefined');
+
+        console.log('[createSLATicket] Sending SLA payload:', { desc, subject });
 
         await axios.post(
             'https://sla.railwire.co.in/mspcntl/addmspincident ',
@@ -2508,6 +2523,7 @@ const getUsername = async (firstName, baseUsername, cookies) => {
                 mod_username: modUsername,
                 railwire_test_name: cookies.railwireCookie.value
             }).toString();
+            console.log(`[getUsername] Deriving username with fname: "${firstName}", mod_username: "${modUsername}"`);
             const { data } = await axios.post(`${baseURL}/kycapis/derive_username`, payload, { 
                 headers: { 
                     Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
@@ -2603,6 +2619,8 @@ const createSubscription = async (link, derivedUsername, cookies, originalMessag
             mobileno: hiddenInputs.mobileno
         }).toString();
 
+        console.log('[createSubscription] Sending subscription payload:', Object.fromEntries(new URLSearchParams(payload)));
+
         const { status, data: subscriptionResponse } = await axios.post(`${baseURL}/kycapis/create_subscription`, payload, { 
             headers: { 
                 Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
@@ -2651,6 +2669,7 @@ const handleVerifiedForm = async (link, cookies, originalMessage) => {
 
         const baseUsername = `${jhCode}.${firstName}`;
         const finalUsername = await getUsername(firstName, baseUsername, cookies);
+        console.log(`[handleVerifiedForm] Derived Data: Name="${firstName}", Partner="${associatedPartner}", JHCode="${jhCode}", BaseUser="${baseUsername}", FinalUser="${finalUsername}"`);
         if (!finalUsername) throw new Error('Failed to derive username.');
 
         return await createSubscription(link, finalUsername, cookies, originalMessage);
@@ -2682,6 +2701,7 @@ const handleSubmittedForm = async (link, oltabid, cookies, username, originalMes
           mobileno_dual: mobileNo, 
           railwire_test_name: cookies.railwireCookie.value 
         }).toString();
+        console.log(`[handleSubmittedForm] Marking KYC as verified for oltabid: ${oltabid}`);
         await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, { 
           headers: { 
             Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
@@ -2727,6 +2747,7 @@ const handleSubmittedForm = async (link, oltabid, cookies, username, originalMes
   
         const userInputMessage = await waitForReply(originalMessage);
         const userInput = userInputMessage.body.toLowerCase();
+        console.log(`[handleSubmittedForm] User input for verification of mobile ${mobileNo} was: "${userInput}"`);
   
         if (userInput.startsWith('y')) {
           const payload = new URLSearchParams({ 
@@ -2849,8 +2870,7 @@ const processOTTComplaint = async (message, userIdentifier, serviceProvider) => 
     const chat = await message.getChat();
 
     // Load OTT data
-    const ottData = userDataCacheByFile['AllData'];
-    const userData = ottData.get(userCode);
+    const userData = subscriberDataCache.get(userCode);
 
     if (!userData) {
         userSessions.delete(userIdentifier);
@@ -2862,29 +2882,32 @@ const processOTTComplaint = async (message, userIdentifier, serviceProvider) => 
         const loginResult = await login();
 
         const payload = {
-            Mode: 1,
-            ComplaintNo: 0,
-            ContactName: userData.ContactName,
-            CustMobileNo: userData.MobileNo,
-            Username: userData.Username,
-            CompanyName: "RailTel Corporation India Ltd.",
-            VendorCode: "RTCIL",
-            OperatorCode: "JHRT",
-            Email: userData.Email,
-            Phone: userData.MobileNo,
-            Subject: `${serviceProvider} not working`,
-            Description: `Customer is not able to use ${serviceProvider}`,
-            Remark: "",
-            Status: "O",
-            TicketOwner: "Angad",
-            ServiceProvider: serviceProvider,
-            IssueType: "Subscription",
-            ReportedDate: new Date().toISOString().slice(0, 16),
-            Priority: "High",
-            Channel: "Phone",
-            Classifications: "Problem",
-            UserId: loginResult.UserId
+        Mode: 1,
+        ComplaintNo: 0,
+        ContactName: userData['Name'] || userData.Name,
+        CustMobileNo: userData['MobileNo'] || userData.MobileNo,
+        Username: userData.Username,
+        CompanyName: "RailTel Corporation India Ltd.",
+        VendorCode: "RTCIL",
+        OperatorCode: "JHRT",
+        Email: userData['Email'] || userData.Email,
+        Phone: userData['MobileNo'] || userData.MobileNo,
+        Subject: `${serviceProvider} not working`,
+        Description: `Customer is not able to use ${serviceProvider}`,
+        Remark: "",
+        Status: "O",
+        TicketOwner: "Angad",
+        ServiceProvider: serviceProvider,
+        IssueType: "Subscription",
+        ReportedDate: new Date().toISOString().slice(0, 16),
+        Priority: "High",
+        Channel: "Phone",
+        Classifications: "Problem",
+        UserId: loginResult.UserId
         };
+
+        console.log(`[processOTTComplaint] Sending payload for ${userData.Username}:`, payload);
+
 
         // Submit complaint
         const response = await axios.post(
@@ -2938,11 +2961,11 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
     }
 
     const { userCodes } = session;
-    const userDataMap = userDataCacheByFile['AllData'];
+    console.log(`[processActions] Starting actions for ${userCodes.length} user(s): [${userCodes.join(', ')}]`);
 
     for (const userCode of userCodes) {
         try {
-            let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
+            let fetchedUserData = subscriberDataCache.get(userCode) || await fetchUserDataFromPortal(userCode);
             if (fetchedUserData) {
                 let passwordResetResult = null;
                 const maskedName = maskName(toTitleCase(fetchedUserData.Name));
