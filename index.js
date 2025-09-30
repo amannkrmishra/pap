@@ -33,16 +33,18 @@ const { publicEncrypt, constants } = require('crypto');
 const { URLSearchParams } = require('url');
 const FormData = require('form-data');
 const fs = require('fs');
-
+const axios = require('axios');
+const { buildAxiosFetch } = require('@lifeomic/axios-fetch');
+const { fetch } = require('undici');
 const sharp = require('sharp');
 const cron = require('node-cron');
 const Tesseract = require('tesseract.js');
-const axios = require('axios');
 const qrcode = require('qrcode-terminal');
 const path = require('path');
 const cheerio = require('cheerio');
 const XLSX = require('xlsx');
 
+axios.defaults.adapter = buildAxiosFetch(fetch);
 
 const PROCESSED_TICKETS_STATE_FILE_PATH = path.join(__dirname, 'processedTicketsState.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
@@ -745,7 +747,6 @@ const getSubscriberCount = async () => {
 // -- Fetches a subscriber's details (ID, username, mobile, name) from the Railwire billing portal --
 
 async function fetchUserDataFromPortal(userCode) {
-    console.log(`[LiveFetch] User "${userCode}" not in cache. Fetching from portal...`);
     try {
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
@@ -802,8 +803,6 @@ async function fetchUserDataFromPortal(userCode) {
             id: cells.eq(0).text().trim(),
             name: name
         };
-
-        console.log(`[LiveFetch] ${userData ? 'Successfully found' : 'Failed to find'} live data for "${userCode}".`);
 
         return userData ? {
             Username: userData.username,
@@ -1165,7 +1164,6 @@ const handleAnpUpdate = async (message) => {
             return;
         } else {
             match = multipleMatches[0];
-            console.log('[handleAnpUpdate] Found partner match:', match);
         }
 
         await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
@@ -1304,8 +1302,6 @@ const handleAnpUpdate = async (message) => {
                     'Cookie': cookieString
                 }
             });
-
-            console.log('[handleAnpUpdate] Sending final ANP update payload:', payload);
 
             if (updateResponse.data && (updateResponse.data.STATUS === "OK" || updateResponse.data.STATUS === "BANK VERIFIED")) {
                 await chat.sendMessage(`✅ ANP details updated successfully for *${match.name}*!`);
@@ -2038,7 +2034,6 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
                 
                 // Case-insensitive cluster check
                 if (ticketDetails.cluster.toLowerCase() !== 'tatanagar') {
-                    console.log(`[TicketMonitor] Skipping ticket #${ticket.ticketId} - Cluster "${ticketDetails.cluster}" is not Tatanagar.`);
                     console.log(`Skipping ticket #${ticket.ticketId} - Cluster: ${ticketDetails.cluster}`);
                     continue;
                 }
@@ -2211,7 +2206,6 @@ const handleTicketActivation = async (message) => {
                 const shouldCheckSession = autoCloseSubjects.some(subject => ticket.subject.includes(subject));
                 if (shouldCheckSession && subscriberId) {
                     const sessionStatus = await checkSessionStatus(subscriberId);
-                    console.log(`[TicketActivation] Checked session for ticket #${ticket.ticketId} (${subscriberId}): Status is ${sessionStatus}.`);
                     if (sessionStatus === 'Active') {
                         const closePayload = new URLSearchParams({ ticketid: ticket.ticketId, response: 'Dear customer, link has been restored.', railwire_test_name: cookies.railwireCookie.value });
                         console.log(`[handleTicketActivation] Closing ticket #${ticket.ticketId} for subscriber ${subscriberId}`);
@@ -2260,7 +2254,6 @@ const extractUsernamesFromImage = async (message) => {
             .toBuffer();
 
         const { data: { text } } = await Tesseract.recognize( processedImageBuffer, 'eng' );
-        console.log(`[OCR] Raw extracted text: "${text.replace(/\n/g, ' ')}"`);
 
         const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
         let matches = text.match(subscriberIdPattern) || [];
@@ -2669,7 +2662,6 @@ const handleVerifiedForm = async (link, cookies, originalMessage) => {
 
         const baseUsername = `${jhCode}.${firstName}`;
         const finalUsername = await getUsername(firstName, baseUsername, cookies);
-        console.log(`[handleVerifiedForm] Derived Data: Name="${firstName}", Partner="${associatedPartner}", JHCode="${jhCode}", BaseUser="${baseUsername}", FinalUser="${finalUsername}"`);
         if (!finalUsername) throw new Error('Failed to derive username.');
 
         return await createSubscription(link, finalUsername, cookies, originalMessage);
@@ -2747,7 +2739,6 @@ const handleSubmittedForm = async (link, oltabid, cookies, username, originalMes
   
         const userInputMessage = await waitForReply(originalMessage);
         const userInput = userInputMessage.body.toLowerCase();
-        console.log(`[handleSubmittedForm] User input for verification of mobile ${mobileNo} was: "${userInput}"`);
   
         if (userInput.startsWith('y')) {
           const payload = new URLSearchParams({ 
@@ -2961,7 +2952,6 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
     }
 
     const { userCodes } = session;
-    console.log(`[processActions] Starting actions for ${userCodes.length} user(s): [${userCodes.join(', ')}]`);
 
     for (const userCode of userCodes) {
         try {
