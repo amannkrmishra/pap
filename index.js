@@ -1923,9 +1923,15 @@ const checkAnpCountsAndNotify = async (manualTriggerChatId = null) => {
         });
 
         const previousCounts = loadAnpCountsState();
+
+        if (Object.keys(previousCounts).length === 0) {
+            saveAnpCountsState(currentCounts);
+            if (manualTriggerChatId) await client.sendMessage(manualTriggerChatId, "Subsequent checks will report changes.");
+            return;
+        }
+
         const increased = [];
         const decreased = [];
-
         const allPartners = new Set([...Object.keys(currentCounts), ...Object.keys(previousCounts)]);
 
         allPartners.forEach(partnerName => {
@@ -1934,9 +1940,9 @@ const checkAnpCountsAndNotify = async (manualTriggerChatId = null) => {
             const diff = currentCount - previousCount;
 
             if (diff > 0) {
-                increased.push(`${partnerName}: ${previousCount} ➡️ ${currentCount} (+${diff})`);
+                increased.push(`${partnerName}: ${previousCount} -> ${currentCount} (+${diff})`);
             } else if (diff < 0) {
-                decreased.push(`${partnerName}: ${previousCount} ➡️ ${currentCount} (${diff})`);
+                decreased.push(`${partnerName}: ${previousCount} -> ${currentCount} (${diff})`);
             }
         });
 
@@ -1944,30 +1950,27 @@ const checkAnpCountsAndNotify = async (manualTriggerChatId = null) => {
 
         if (increased.length === 0 && decreased.length === 0) {
             if (manualTriggerChatId) {
-                let noChangeMessage = `*📊 ANP Subscriber Count Report*\n` +
-                                      `*🗓️ Date:* ${reportDate}\n` +
-                                      `-----------------------------------\n` +
-                                      `✅ *All Stable!* No changes detected.` +
+                let noChangeMessage = `*ANP Subscriber Count Report*\n` +
+                                      `*Date:* ${reportDate}\n\n` +
+                                      `*All Stable!* No changes detected since the last check.` +
                                       `\n\nTo check anytime type: *anpcount*`;
                 await client.sendMessage(manualTriggerChatId, noChangeMessage);
             }
         } else {
-            let reportMessage = `*📊 ANP Subscriber Count Report*\n` +
-                                `*🗓️ Date:* ${reportDate}\n` +
-                                `-----------------------------------\n` +
+            let reportMessage = `*ANP Subscriber Count Report*\n` +
+                                `*Date:* ${reportDate}\n\n` +
                                 `*Summary:*\n` +
-                                `📈 *${increased.length}* partner(s) increased.\n` +
-                                `📉 *${decreased.length}* partner(s) decreased.`;
+                                `${increased.length} partner(s) increased.\n` +
+                                `${decreased.length} partner(s) decreased.`;
 
             if (increased.length > 0) {
-                reportMessage += `\n-----------------------------------\n*📈 Increased Subscribers:*\n${increased.join('\n')}`;
+                reportMessage += `\n\n*Increased Subscribers:*\n${increased.join('\n')}`;
             }
             if (decreased.length > 0) {
-                reportMessage += `\n-----------------------------------\n*📉 Decreased Subscribers:*\n${decreased.join('\n')}`;
+                reportMessage += `\n\n*Decreased Subscribers:*\n${decreased.join('\n')}`;
             }
             
             const targetId = manualTriggerChatId || ANP_CONFIG.AMAN_TARGET_ID;
-            // Add the footer only if it's a manual trigger
             if (manualTriggerChatId) {
                 reportMessage += `\n\nTo check anytime type: *anpcount*`;
             }
@@ -1979,7 +1982,7 @@ const checkAnpCountsAndNotify = async (manualTriggerChatId = null) => {
     } catch (error) {
         console.error('Error during ANP count check:', error.message);
         if (manualTriggerChatId) {
-            await client.sendMessage(manualTriggerChatId, `❌ Error checking ANP counts: ${error.message}`);
+            await client.sendMessage(manualTriggerChatId, `Error checking ANP counts: ${error.message}`);
         }
     }
 };
@@ -3244,8 +3247,10 @@ const handleIncomingMessage = async (message) => {
         }
 
         if (messageBodyNoSpaces.includes('anpcount')) {
+            const currentHour = new Date().getHours();
+            if (currentHour < 9) return await message.reply('This command is only active between 9:00 AM and 11:59 PM.');
             await message.reply('Checking ANP subscriber counts...');
-            await checkAnpCountsAndNotify(chat.id._serialized); // Pass chat ID to reply back
+            await checkAnpCountsAndNotify(chat.id._serialized);
             return;
         }
         
@@ -3428,8 +3433,10 @@ client.on('ready', async () => {
             }
         };
 
-        // ANP Subscriber Count Tracking (runs every 1 hours)
-        cron.schedule('*/9 * * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
+        cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); } catch (e) {} }, { timezone: "Asia/Kolkata" });
+
+        // ANP Subscriber Count Tracking (runs every 9 mins, from 9 AM to 11 PM)
+        cron.schedule('*/9 9-23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
 
         // Daily Subscriber Report CSV Downloading and Count Share
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
