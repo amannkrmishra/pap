@@ -47,6 +47,7 @@ const XLSX = require('xlsx');
 const PROCESSED_TICKETS_STATE_FILE_PATH = path.join(__dirname, 'processedTicketsState.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
 const ANP_REPORT_STATE_FILE_PATH = path.join(__dirname, 'anpReportState.json');
+const ANP_COUNTS_STATE_FILE_PATH = path.join(__dirname, 'anpCounts.json');
 const PackageNameToFilterOut = "FUP10Mbps-1Mbps 30GB";
 
 // --- Configuration & Constants ---
@@ -503,6 +504,28 @@ const headers = [
     });
     
     return csv;
+};
+
+// -- Loads ANP subscriber counts from JSON file --
+const loadAnpCountsState = () => {
+    try {
+        if (fs.existsSync(ANP_COUNTS_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(ANP_COUNTS_STATE_FILE_PATH, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (error) {
+        console.error('Error loading ANP counts state:', error.message);
+    }
+    return {}; // Return empty object if file doesn't exist or fails
+};
+
+// -- Saves ANP subscriber counts to JSON file --
+const saveAnpCountsState = (data) => {
+    try {
+        fs.writeFileSync(ANP_COUNTS_STATE_FILE_PATH, JSON.stringify(data, null, 2), 'utf8');
+    } catch (error) {
+        console.error('Error saving ANP counts state:', error.message);
+    }
 };
 
 /* ----------------------------------------------------------------
@@ -1879,6 +1902,66 @@ const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
     }
 };
 
+// -- Checks for changes in ANP active subscriber counts and notifies --
+const checkAnpCountsAndNotify = async (manualTriggerChatId = null) => {
+    try {
+        const cookies = sessionCache;
+        if (!cookies) throw new Error("Session not available for ANP count check.");
+
+        const billingCookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        const { data } = await axios.get(`${baseURL}/billcntl/billpartners`, { headers: { 'Cookie': billingCookieString } });
+
+        const currentCounts = {};
+        const $ = cheerio.load(data);
+        $('table#dynamic-table tbody tr').each((i, elem) => {
+            const tds = $(elem).find('td');
+            const partnerName = $(tds[1]).find('a').text().trim();
+            const activeSubs = parseInt($(tds[8]).text().trim(), 10);
+            if (partnerName && !isNaN(activeSubs)) {
+                currentCounts[partnerName] = activeSubs;
+            }
+        });
+
+        const previousCounts = loadAnpCountsState();
+        const increased = [];
+        const decreased = [];
+
+        const allPartners = new Set([...Object.keys(currentCounts), ...Object.keys(previousCounts)]);
+
+        allPartners.forEach(partnerName => {
+            const currentCount = currentCounts[partnerName] || 0;
+            const previousCount = previousCounts[partnerName] || 0;
+            const diff = currentCount - previousCount;
+
+            if (diff > 0) {
+                increased.push(`- *${partnerName}:* ${previousCount} ➡️ ${currentCount} (+${diff})`);
+            } else if (diff < 0) {
+                decreased.push(`- *${partnerName}:* ${previousCount} ➡️ ${currentCount} (${diff})`);
+            }
+        });
+
+        let reportMessage = '';
+        if (increased.length === 0 && decreased.length === 0) {
+            reportMessage = '✅ No changes in ANP subscriber counts since last check.';
+        } else {
+            reportMessage = '*📊 ANP Subscriber Count Changes*';
+            if (increased.length > 0) reportMessage += `\n\n*📈 Increased:*\n${increased.join('\n')}`;
+            if (decreased.length > 0) reportMessage += `\n\n*📉 Decreased:*\n${decreased.join('\n')}`;
+        }
+
+        const targetId = manualTriggerChatId || ANP_CONFIG.AMAN_TARGET_ID;
+        await client.sendMessage(targetId, reportMessage);
+
+        saveAnpCountsState(currentCounts);
+
+    } catch (error) {
+        console.error('Error during ANP count check:', error.message);
+        if (manualTriggerChatId) {
+            await client.sendMessage(manualTriggerChatId, `❌ Error checking ANP counts: ${error.message}`);
+        }
+    }
+};
+
 /* ----------------------------------------------------------------
 Section 7: CRM & Ticket Monitoring Features
 ------------------------------------------------------------------- */
@@ -3137,6 +3220,12 @@ const handleIncomingMessage = async (message) => {
             }
             return;
         }
+
+        if (messageBodyNoSpaces.includes('anpcount')) {
+            await message.reply('Checking ANP subscriber counts...');
+            await checkAnpCountsAndNotify(chat.id._serialized); // Pass chat ID to reply back
+            return;
+        }
         
         if (messageBodyNoSpaces.includes('anpupdate')) {
             await handleAnpUpdate(message);
@@ -3316,6 +3405,9 @@ client.on('ready', async () => {
                 console.error('Scheduled daily task failed:', error.message);
             }
         };
+
+        // ANP Subscriber Count Tracking (runs every 1 hours)
+        cron.schedule('0 * * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
 
         // Daily Subscriber Report CSV Downloading and Count Share
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
