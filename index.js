@@ -1362,7 +1362,7 @@ const handlePlanChange = async (message) => {
     const chat = await message.getChat();
     const messageBody = message.body;
 
-    const usernamePattern = /jh[\.\w]+/gi;
+    const usernamePattern = /(?<!\/)\b(jh(\.[\w-]+)+)\b/gi;
     const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
     const packageIdPattern = /\b\d{5,6}\b/g;
 
@@ -2270,7 +2270,7 @@ const extractUsernamesFromImage = async (message) => {
             return [...new Set(matches)];
         }
 
-        const usernamePattern = /\b(jh\.[a-z0-9\._-]+)\b/gi;
+        const usernamePattern = /(?<!\/)\b(jh(\.[\w-]+)+)\b/gi;
         matches = text.match(usernamePattern) || [];
 
         if (matches.length > 0) {
@@ -3038,7 +3038,7 @@ const handleIncomingMessage = async (message) => {
         const SESSION_TIMEOUT_MS = 300000;
         const EXECUTION_DELAY_MS = 1300;
 
-        const codePattern = /jh(\s*\.\s*\w+){2,}/gi;
+        const codePattern = /(?<!\/)\b(jh(\.[\w-]+)+)\b/gi;
         const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
 
         const codesFromText = (rawBody.match(codePattern) || []).concat(rawBody.match(subscriberIdPattern) || []);
