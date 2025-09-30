@@ -1722,19 +1722,23 @@ const sendAnpAlert = async (message, partnerDetails = null) => {
 
 const getAllPartners = async (authData) => {
     const billingCookieString = `${authData.railwireCookie.name}=${authData.railwireCookie.value}; ${authData.ciSessionCookie.name}=${authData.ciSessionCookie.value}`;
-    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`, { headers: { 'Cookie': billingCookieString, 'Referer': `${baseURL}/billcntl/all_sms_templates` } }));
+    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl/billpartners`, { headers: { 'Cookie': billingCookieString } }));
 
     const $ = cheerio.load(data);
     const partners = [];
-    $('table tbody tr').each((i, elem) => {
+    $('table#dynamic-table tbody tr').each((i, elem) => {
         const tds = $(elem).find('td');
-        if (tds.length < 4) return;
-        const partnerId = $(tds[0]).find('input').val();
-        const partnerName = $(tds[2]).text().trim();
-        const totalSubs = parseInt($(tds[3]).text().trim(), 10);
-        if (partnerId && partnerName && !isNaN(totalSubs)) partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
+        const anpStatus = $(tds[9]).text().trim();
+        if (anpStatus.toLowerCase() === 'active') {
+            const partnerId = $(tds[0]).text().trim();
+            const partnerName = $(tds[1]).find('a').text().trim();
+            const totalSubs = parseInt($(tds[8]).text().trim(), 10);
+            if (partnerId && partnerName && !isNaN(totalSubs)) {
+                partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
+            }
+        }
     });
-    if (partners.length === 0) throw new Error("ANP Checker: Could not find any partners.");
+    if (partners.length === 0) throw new Error("ANP Checker: Could not find any active partners.");
     return partners;
 };
 
