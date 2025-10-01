@@ -1,57 +1,76 @@
-/* ----------------------------------------------------------------
-Section 1: Dependencies, Client Initialization, and Global State
-------------------------------------------------------------------- */
+const {
+    Client,
+    LocalAuth,
+    MessageMedia
+} = require('whatsapp-web.js');
 
-// --- Dependencies (Requires) ---
-
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-
-// --- WhatsApp Client Initialization ---
-const client = new Client({ authStrategy: new LocalAuth(), puppeteer: { headless: "new", args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-extensions', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--disable-dev-shm-usage', '--disable-gpu', '--disable-software-rasterizer', '--disable-infobars', '--disable-features=site-per-process', '--disable-features=IsolateOrigins', '--disable-blink-features=AutomationControlled', '--disable-translate', '--disable-sync', '--disable-web-security', '--disable-default-apps', '--no-zygote', '--no-first-run', '--mute-audio', '--hide-scrollbars', '--disable-logging', '--disable-notifications']}});
-
-
-
-// --- Global Caches and State Variables ---
-
-let partnerMappings = null;
-let partnerIndex = null;
-let subscriberDataCache = null;
-let sessionCache = null;
-let partnerLiveDetailsCache = null;
-let nmsSessionCache = null;
-let lastStillDownReportTime = 0;
-let partnerNameLookupCache = null;
-const baseURL = 'https://jh.railwire.co.in';
-const mainURL = `${baseURL}/billcntl/kycpending`;
-let jhCodeMap = null;
-
-let processedTicketsState = {};
-const downPartnersState = new Map();
-const userSessions = new Map();
-
-const { publicEncrypt, constants } = require('crypto');
-const { URLSearchParams } = require('url');
+// -- WhatsApp Web client initialization with Puppeteer headless browser configuration
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: "new",
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-extensions',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-infobars',
+            '--disable-features=site-per-process',
+            '--disable-features=IsolateOrigins',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-translate',
+            '--disable-sync',
+            '--disable-web-security',
+            '--disable-default-apps',
+            '--no-zygote',
+            '--no-first-run',
+            '--mute-audio',
+            '--hide-scrollbars',
+            '--disable-logging',
+            '--disable-notifications'
+        ]
+    }
+});
 const FormData = require('form-data');
-const fs = require('fs');
-
 const sharp = require('sharp');
 const cron = require('node-cron');
 const Tesseract = require('tesseract.js');
 const axios = require('axios');
+const fs = require('fs');
 const qrcode = require('qrcode-terminal');
+let partnerNameLookupCache = null;
 const path = require('path');
+const {
+    publicEncrypt,
+    constants
+} = require('crypto');
+const {
+    URLSearchParams
+} = require('url');
 const cheerio = require('cheerio');
 const XLSX = require('xlsx');
-
-
+const userSessions = new Map();
+let partnerMappings = null;
+let partnerIndex = null;
+let subscriberDataCache = null;
+let partnerLiveDetailsCache = null;
+let nmsSessionCache = null;
+let lastStillDownReportTime = 0;
 const PROCESSED_TICKETS_STATE_FILE_PATH = path.join(__dirname, 'processedTicketsState.json');
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
 const ANP_REPORT_STATE_FILE_PATH = path.join(__dirname, 'anpReportState.json');
-const ANP_COUNTS_STATE_FILE_PATH = path.join(__dirname, 'anpCounts.json');
 const PackageNameToFilterOut = "FUP10Mbps-1Mbps 30GB";
-
-// --- Configuration & Constants ---
-
+let processedTicketsState = {};
+let sessionCache = null;
+const userDataCacheByFile = {};
+const downPartnersState = new Map();
+// -- Configuration object for ANP (Access Network Provider) monitoring - contains service URLs, target numbers, ignored partner IDs
+// In ANP_CONFIG, add these two new properties:
 const ANP_CONFIG = {
     SERVICES_URL: 'https://services.railwire.co.in',
     TARGET_ID: '916200493605@c.us',
@@ -63,12 +82,35 @@ const ANP_CONFIG = {
         '5570382470', '2005592154', '3423963007', '1163822769', '1840251248',
         '4352542809', '2090233061', '6096321831', '2692518024',
     ]),
+    // --- ADD THESE TWO LINES ---
     AMAN_TARGET_ID: '916200493605@c.us',
     AMAN_DISTRICTS: new Set([
         'Pashchimi Singhbhum',
         'Saraikela-Kharsawan',
         'Purbi Singhbhum'
     ])
+    // -------------------------
+};
+
+// Helper function to parse CSV data properly
+const parseCSVLine = (line) => {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+            inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+            result.push(current.trim());
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+    result.push(current.trim());
+    return result;
 };
 
 // -- Set of allowed ticket subjects that the bot will process and alert on
@@ -99,74 +141,102 @@ const TICKET_MONITOR_CONFIG = {
 };
 
 
-
-// -- Subjects list for SLA Ticket creation --
-const subjects = [
-    "Activate with available balance", "AGNP bank details updation", "ANP - Mobile number and Email ID change",
-    "ANP address change", "ANP Demo ID renewal", "ANP disbursement issue", "ANP GSTIN issue",
-    "ANP name change", "ANP online recharge issue", "ANP-AGNP mapping", "Authentication issue",
-    "BSS issue", "CRM ticket issue", "CSV download option issue", "Data usage issue", "Decommission date updation",
-    "disable sub-online recharge", "DOC updation", "Double recharge", "DVR IP Port Request",
-    "Enable sub-online recharge", "IFSC code issue", "Invoice issue", "Location transfer",
-    "Others", "Package change", "Permanent Inactive Request", "Plan Implementation", "Plan Upgradation",
-    "SLA dashboard issue", "Stale session", "Static IP DoP updation", "Static IP recharge issue",
-    "Static IP renewal issue", "Sub - Mobile number and Email ID Change", "Subscriber address change",
-    "Subscriber applicant name change", "Subscriber GSTIN change", "Subscriber GSTIN issue",
-    "Subscriber GSTIN Removal", "Subscriber KYC-Application Mapping", "Subscriber KYC/Application issue",
-    "Subscriber online recharge issue", "Subscriber package issue", "Subscriber static IP issue",
-    "Subscription expiry", "Subscription type change", "User Reactivation", "Username change",
-    "Wrong recharge"
-];
-
-/* ----------------------------------------------------------------
-Section 2: Base Utilities & Helpers
-------------------------------------------------------------------- */
-
-// -- Helper function to parse CSV data properly --
-
-const parseCSVLine = (line) => {
-    const result = [];
-    let current = '';
-    let inQuotes = false;
-    
-    for (let i = 0; i < line.length; i++) {
-        const char = line[i];
-        if (char === '"') {
-            inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-            result.push(current.trim());
-            current = '';
-        } else {
-            current += char;
+const sendAnpAlert = async (message, partnerDetails = null) => {
+    if (!partnerDetails) {
+        return;
+    }
+    const district = partnerDetails['District'];
+    if (district && ANP_CONFIG.AMAN_DISTRICTS.has(district)) {
+        try {
+            await client.sendMessage(ANP_CONFIG.AMAN_TARGET_ID, message);
+        } catch (error) {
+            console.error(`Failed to send ANP alert to Aman: ${error.message}`);
         }
     }
-    result.push(current.trim());
-    return result;
 };
 
-// -- Converts a string to Title Case --
+// -- Helper Functions Start --
 
-const toTitleCase = (str) => {
-    if (!str) return '';
-    return str.trim()
-        .split(/\s+/)
-        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-        .join(' ');
+// -- Saves processed ticket state (including message count) to JSON
+const saveProcessedTicketsState = () => {
+    try {
+        const data = JSON.stringify(processedTicketsState, null, 2); // Using JSON object now
+        fs.writeFileSync(PROCESSED_TICKETS_STATE_FILE_PATH, data, 'utf8');
+    } catch (error) {
+        console.error('Error saving processed tickets state:', error.message);
+    }
 };
 
-// -- Normalizes a string (trims and converts to lowercase) --
 
-const normalize = (str) => str?.toString().trim().toLowerCase() || '';
-
-// -- Generates a random 10-digit mobile number starting with '5' --
-
-const generateRandomMobile = () => {
-    const randomDigits = Math.floor(100000000 + Math.random() * 900000000).toString();
-    return `5${randomDigits}`;
+// -- Loads previously processed ticket state from JSON on bot startup
+const loadProcessedTicketsState = () => {
+    try {
+        if (fs.existsSync(PROCESSED_TICKETS_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(PROCESSED_TICKETS_STATE_FILE_PATH, 'utf8');
+            processedTicketsState = JSON.parse(data);
+            console.log(`Loaded state for ${Object.keys(processedTicketsState).length} processed tickets from file.`);
+        } else {
+            processedTicketsState = {}; // Initialize if file doesn't exist
+        }
+    } catch (error) {
+        console.error('Error loading processed tickets state:', error.message);
+        processedTicketsState = {}; // Reset on error
+    }
 };
 
-// -- Generates a random email address based on a username --
+// -- Saves ANP down state (which partners are currently down) to JSON file
+const saveAnpDownState = () => {
+    try {
+        const data = JSON.stringify(Array.from(downPartnersState.entries()));
+        fs.writeFileSync(ANP_STATE_FILE_PATH, data, 'utf8');
+    } catch (error) {
+        console.error('Error saving ANP down state:', error.message);
+    }
+};
 
+// -- Loads ANP down state from JSON file to maintain state across bot restarts
+const loadAnpDownState = () => {
+    try {
+        if (fs.existsSync(ANP_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(ANP_STATE_FILE_PATH, 'utf8');
+            const entries = JSON.parse(data);
+            const loadedMap = new Map(entries);
+            downPartnersState.clear();
+            for (const [key, value] of loadedMap.entries()) {
+                downPartnersState.set(key, value);
+            }
+            console.log(`Loaded ${downPartnersState.size} down ANP states from file.`);
+        }
+    } catch (error) {
+        console.error('Error loading ANP down state:', error.message);
+    }
+};
+
+const saveAnpReportState = () => {
+    try {
+        const data = JSON.stringify({ lastStillDownReportTime });
+        fs.writeFileSync(ANP_REPORT_STATE_FILE_PATH, data, 'utf8');
+    } catch (error) {
+        console.error('Error saving ANP report state:', error.message);
+    }
+};
+
+const loadAnpReportState = () => {
+    try {
+        if (fs.existsSync(ANP_REPORT_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(ANP_REPORT_STATE_FILE_PATH, 'utf8');
+            const state = JSON.parse(data);
+            if (state && typeof state.lastStillDownReportTime === 'number') {
+                lastStillDownReportTime = state.lastStillDownReportTime;
+                console.log(`Loaded last ANP report time: ${new Date(lastStillDownReportTime).toLocaleString()}`);
+            }
+        }
+    } catch (error) {
+        console.error('Error loading ANP report state:', error.message);
+    }
+};
+
+// -- Generates random email address based on username for bulk updates
 const generateRandomEmail = (username) => {
     if (!username || typeof username !== 'string') {
         return `random${Date.now()}@gmaill.com`;
@@ -177,8 +247,7 @@ const generateRandomEmail = (username) => {
     return `${namePart}${randomNum}@gmaill.com`.toLowerCase();
 };
 
-// -- Masks subscriber names by replacing characters with 'x' for privacy --
-
+// -- Masks subscriber names by replacing characters with 'x' for privacy
 const maskName = (name) => {
     if (!name || typeof name !== 'string') return 'N/A';
     const parts = name.trim().split(/\s+/);
@@ -191,8 +260,7 @@ const maskName = (name) => {
     return maskedParts.join(' ');
 };
 
-// -- Masks usernames/user codes by replacing characters with 'x' for privacy --
-
+// -- Masks usernames by replacing characters with 'x' for privacy
 const maskUsername = (userCode) => {
     if (!userCode || typeof userCode !== 'string') return 'N/A';
     const parts = userCode.split('.');
@@ -212,53 +280,308 @@ const maskUsername = (userCode) => {
     return userCode;
 };
 
-// -- Determines the unique identifier for the user (from or author) who sent the message --
+// -- Creates header mapping from Excel file headers for data processing
+const createHeaderMap = (header) => header.reduce((acc, col, index) => {
+    acc[col] = index;
+    return acc;
+}, {});
 
-const getUserIdentifier = (message) => {
-    return message.fromMe ? message.to : (message.author || message.from);
-};
+// -- Uses Tesseract OCR to extract usernames/IDs from uploaded images
+const extractUsernamesFromImage = async (message) => {
+    if (!message.hasMedia) return [];
+    const media = await message.downloadMedia();
+    if (!media || !media.mimetype.startsWith('image/')) return [];
 
-// -- Pauses execution and waits for a reply message from the same user --
+    try {
+        const imageBuffer = Buffer.from(media.data, 'base64');
 
-const waitForReply = async (originalMessage) => {
-    const userIdentifier = getUserIdentifier(originalMessage);
-    return new Promise((resolve) => {
-        const listener = (message) => {
-            if (getUserIdentifier(message) === userIdentifier) {
-                client.removeListener('message', listener);
-                resolve(message);
-            }
-        };
-        client.on('message', listener);
-    });
-};
+        const processedImageBuffer = await sharp(imageBuffer)
+            .greyscale()
+            .normalize()
+            .sharpen()
+            .toBuffer();
 
-// -- Generic utility to process an array of items in smaller concurrent batches --
+        const { data: { text } } = await Tesseract.recognize(
+            processedImageBuffer,
+            'eng'
+        );
 
-const processInBatches = async (items, asyncFn, batchSize = 15) => {
-    let results = [];
-    for (let i = 0; i < items.length; i += batchSize) {
-        const batchItems = items.slice(i, i + batchSize);
-        const batchPromises = batchItems.map(item => asyncFn(item));
-        const batchResults = await Promise.all(batchPromises);
-        results = results.concat(batchResults);
+        const subscriberIdPattern = /\b\d{5}\b/g;
+        let matches = text.match(subscriberIdPattern) || [];
+
+        if (matches.length > 0) {
+            console.log(`Found Subscriber ID(s): ${matches.join(', ')}`);
+            return [...new Set(matches)];
+        }
+
+        const usernamePattern = /\b(jh\.[a-z0-9\._-]+)\b/gi;
+        matches = text.match(usernamePattern) || [];
+
+        if (matches.length > 0) {
+            console.log(`Found Username(s): ${matches.join(', ')}`);
+        }
+
+        return [...new Set(matches.map(m => m.toLowerCase()))];
+
+    } catch (error) {
+        return [];
     }
-    return results;
 };
 
-/* ----------------------------------------------------------------
-Section 3: Data Caching & Loading
-------------------------------------------------------------------- */
+// -- Helper Fuction End --
 
-// -- Loads all subscriber and partner data from the consolidated Excel file into various caches --
+const sendTicketAlert = async (message) => {
+    try {
+        const chat = await client.getChatById(TICKET_MONITOR_CONFIG.TARGET_ID);
+        await chat.sendMessage(message);
+    } catch (error) {
+    }
+};
 
+const replyToTicket = async (ticketId, content) => {
+    try {
+        const cookies = sessionCache;
+        if (!cookies) throw new Error('No active session.');
+
+        const form = new FormData();
+        form.append('railwire_test_name', cookies.railwireCookie.value);
+        form.append('ticketid', ticketId);
+        form.append('content', content);
+
+        const response = await axios.post('https://jh.railwire.co.in/crmcntl/bill_tickreply', form, {
+            headers: {
+                ...form.getHeaders(),
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        });
+
+        return response.status === 200;
+    } catch (error) {
+        console.error(`Error replying to ticket #${ticketId}:`, error.message);
+        return false;
+    }
+};
+
+const handleTicketReply = async (message, ticketId, replyContent) => {
+    const chat = await message.getChat();
+    const success = await replyToTicket(ticketId, replyContent);
+
+    if (success) {
+        // Fetch and show the updated ticket to confirm
+        const ticketViewUrl = `/crmcntl/billticketview/${ticketId}/0`;
+        const updatedDetails = await getTicketDetails(ticketViewUrl, sessionCache);
+        if (updatedDetails) {
+            await chat.sendMessage(`✅ Reply sent! Here is the updated ticket:\n\n${formatTicketMessage(updatedDetails)}`);
+        } else {
+            await chat.sendMessage(`✅ Reply sent, but couldn't fetch the update.`);
+        }
+    } else {
+        await chat.sendMessage(`❌ Failed to send reply to ticket #${ticketId}.`);
+    }
+};
+
+const toTitleCase = (str) => {
+    if (!str) return '';
+    return str.trim()
+        .split(/\s+/)
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+};
+
+const normalize = (str) => str?.toString().trim().toLowerCase() || '';
+
+const generateRandomMobile = () => {
+    const randomDigits = Math.floor(100000000 + Math.random() * 900000000).toString();
+    return `5${randomDigits}`;
+};
+
+const formatTicketMessage = (details) => {
+    const timeOpenedParts = details.timeOpened.split(' on ');
+    let openedDate = details.timeOpened;
+    if (timeOpenedParts.length > 1) {
+        openedDate = timeOpenedParts[1].split(' ').slice(1).join(' ');
+    }
+
+    let message = `*Ticket #${details.ticketId}:*\n\n` +
+        `*Subscriber:* ${details.subscriberUsername}\n` +
+        `*Customer No.:* ${details.customerMobile}\n` +
+        `*Status:* ${details.status}\n` +
+        `*Time opened:* ${openedDate}\n` +
+        `*Subject:* ${details.subject}\n` +
+        `*District:* ${details.district}\n` +
+        `*Cluster:* ${details.cluster}\n` +
+        `*Partner:* ${details.partnerName}\n`;
+
+    if (details.messages.length > 0) {
+        message += `\n`;
+        
+        const messageLines = details.messages.map(msg => {
+            const timePart = (msg.timestamp.split(' on ')[0] || msg.timestamp).toLowerCase();
+            const singleLineContent = msg.content.replace(/\r?\n|\r/g, ' ');
+            return `*${timePart}* | *${msg.author}:* ${singleLineContent}`;
+        });
+        
+        message += messageLines.join('\n\n'); 
+    }
+
+    return message.trim();
+};
+
+const getTicketDetails = async (ticketUrl, cookies) => {
+    const { data } = await axios.get(`https://jh.railwire.co.in${ticketUrl}`, {
+        headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
+    });
+    const $ = cheerio.load(data);
+
+    const details = {};
+    let subscriberUsername = '';
+
+    $('table.table-bordered.table-striped.table-condensed').first().find('tbody tr').each((i, row) => {
+        const key = $(row).find('td:first-child').text().trim().toLowerCase();
+        const value = $(row).find('td:nth-child(2)').text().trim();
+        
+        if (key === 'ticket id') details.ticketId = value;
+        if (key === 'subscriber') subscriberUsername = value;
+        if (key === 'status') details.status = value;
+        if (key === 'time opened') details.timeOpened = value;
+    });
+
+    if (!subscriberUsername) return null;
+    details.subscriberUsername = subscriberUsername;
+
+    const subjectContainer = $('.well.well-lg:contains("Subject :")');
+    subjectContainer.find('span[style="float:right;"]').remove();
+    details.subject = subjectContainer.text().replace('Subject :', '').trim();
+
+    const portalUserData = await fetchUserDataFromPortal(subscriberUsername);
+    details.customerMobile = portalUserData?.MobileNo || 'N/A';
+
+    const cachedSubData = subscriberDataCache.get(normalize(subscriberUsername));
+    details.district = cachedSubData?.['District'] || 'N/A';
+    details.cluster = cachedSubData?.['Cluster'] || 'N/A';
+    details.partnerName = cachedSubData?.['ANP Name'] || 'N/A';
+
+    details.messages = [];
+    $('h5.blue').each((i, authorElement) => {
+        const author = $(authorElement).text().trim();
+        const messageContainer = $(authorElement).parent('.col-xs-2').siblings('.col-xs-10');
+        
+        if (messageContainer.length > 0) {
+            const timestamp = messageContainer.find('h6.header').text().trim();
+            const content = messageContainer.find('.well').text().trim();
+
+            if (author && timestamp && content) {
+                details.messages.push({ author, timestamp, content });
+            }
+        }
+    });
+
+    return details;
+};
+
+const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
+    try {
+        console.log(`Ticket monitoring started - Triggered by: ${triggeredBy}`);
+        
+        const cookies = sessionCache;
+        const apiClient = axios.create({
+            baseURL: 'https://jh.railwire.co.in',
+            headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
+        });
+
+        const pageOffsets = ['', '30', '60', '90'];
+        const ticketsToCheck = [];
+
+        for (const offset of pageOffsets) {
+            const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
+            const response = await apiClient.get(url);
+            const $ = cheerio.load(response.data);
+
+            $('table#results tbody tr').each((i, row) => {
+                const cells = $(row).find('td');
+                const status = $(cells[7]).text().trim().toLowerCase();
+                const subject = $(cells[4]).text().trim().toLowerCase();
+
+                if (!ALLOWED_TICKET_SUBJECTS.has(subject)) {
+                    return; // Skip non-allowed subjects
+                }
+                
+                // We now check ALL 'open' or 'progress' tickets, not just new ones
+                if (status === 'open' || status === 'progress') {
+                    const ticketId = $(cells[0]).contents().first().text().trim();
+                    const viewLink = $(cells[cells.length - 1]).find('a').attr('href');
+                    if (ticketId && viewLink) {
+                        ticketsToCheck.push({ ticketId, viewLink });
+                    }
+                }
+            });
+        }
+
+        if (ticketsToCheck.length === 0) {
+            console.log(`No "Open" or "Progress" tickets found for allowed subjects (${triggeredBy})`);
+            return;
+        }
+
+        let changesFound = false;
+        for (const ticket of ticketsToCheck) {
+            const ticketDetails = await getTicketDetails(ticket.viewLink, cookies);
+            
+            if (ticketDetails) {
+                // Handle missing cluster data
+                if (!ticketDetails.cluster) {
+                    console.log(`Skipping ticket #${ticket.ticketId} - No cluster data available`);
+                    continue;
+                }
+                
+                // Case-insensitive cluster check
+                if (ticketDetails.cluster.toLowerCase() !== 'tatanagar') {
+                    console.log(`Skipping ticket #${ticket.ticketId} - Cluster: ${ticketDetails.cluster}`);
+                    continue;
+                }
+                
+                const currentMessageCount = ticketDetails.messages.length;
+                const lastKnownState = processedTicketsState[ticket.ticketId];
+
+                // SCENARIO 1: Brand new ticket
+                if (!lastKnownState) {
+                    console.log(`New ticket found: #${ticket.ticketId} (${triggeredBy})`);
+                    changesFound = true;
+                    const formattedMessage = formatTicketMessage(ticketDetails);
+                    await sendTicketAlert(formattedMessage);
+                    processedTicketsState[ticket.ticketId] = { messageCount: currentMessageCount };
+                    saveProcessedTicketsState(); // Save state immediately
+                } 
+                // SCENARIO 2: Existing ticket has a new reply
+                else if (lastKnownState.messageCount < currentMessageCount) {
+                    console.log(`Update found for ticket #${ticket.ticketId} (New message) - ${triggeredBy}`);
+                    changesFound = true;
+                    const formattedMessage = formatTicketMessage(ticketDetails);
+                    await sendTicketAlert(formattedMessage);
+                    processedTicketsState[ticket.ticketId].messageCount = currentMessageCount;
+                    saveProcessedTicketsState(); // Save updated state
+                }
+            }
+        }
+
+        if (!changesFound) {
+            console.log(`Checked ${ticketsToCheck.length} active tickets. No new messages or tickets found (${triggeredBy})`);
+        }
+    } catch (error) {
+        console.error(`Error during ticket monitoring (${triggeredBy}):`, error.message);
+    }
+};
+
+// -- This single function replaces all previous Excel loading functions --
 const loadConsolidatedData = (filename = 'AllData.xlsx') => {
+    // Re-initialize all caches to ensure fresh data
     subscriberDataCache = new Map();
     partnerLiveDetailsCache = {};
     partnerMappings = {};
     jhCodeMap = new Map();
     partnerIndex = new Map();
-    partnerNameLookupCache = new Map();
+    partnerNameLookupCache = new Map(); // Initialize the new cache
+    const portalUsersCache = new Map(); 
+
     try {
         const filePath = path.join(__dirname, filename);
         if (!fs.existsSync(filePath)) {
@@ -277,15 +600,18 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
             const anpName = normalize(row['ANP Name']);
             const jhCode = normalize(row['JH Code']);
 
+            // --- VLOOKUP CACHE POPULATION ---
+            // Create the lookup map keyed by Partner Name for filtering functions
             if (anpName && !partnerNameLookupCache.has(anpName)) {
                 partnerNameLookupCache.set(anpName, {
                     'District': row['District'],
-                    'Cluster': row['Cluster'],
                     'Marketing Team': row['Marketing Team'],
                     'Marketing Team No.': row['Marketing Team No.']
                 });
             }
+            // ------------------------------------
 
+            // 1. Populate subscriberDataCache and portalUsersCache
             if (username || subscriberId) {
                  const subscriberDetails = {
                     'Subscriber ID': row['Subscriber ID'],
@@ -313,12 +639,15 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
                 
                 if (subscriberId) {
                     subscriberDataCache.set(subscriberId, subscriberDetails);
+                    portalUsersCache.set(subscriberId, subscriberDetails);
                 }
                 if (username) {
                     subscriberDataCache.set(username, subscriberDetails);
+                    portalUsersCache.set(username, subscriberDetails);
                 }
             }
 
+            // 2. Populate partner-level caches (only once per partner)
             if (anpId && !partnerLiveDetailsCache[anpId]) {
                  partnerLiveDetailsCache[anpId] = {
                     'Partner ID': anpId,
@@ -360,14 +689,14 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
                 }
             }
         }
-        console.log(`Loaded consolidated data for ${subscriberDataCache.size} subscribers and ${Object.keys(partnerLiveDetailsCache).length} partners.`);
+        
+        userDataCacheByFile['AllData'] = portalUsersCache;
+        console.log(`Successfully loaded consolidated data for ${subscriberDataCache.size} subscribers and ${Object.keys(partnerLiveDetailsCache).length} partners.`);
 
     } catch (err) {
         console.error(`Error reading consolidated data from Excel: ${err.message}`);
     }
 };
-
-// -- Wrapper function to initiate the loading of all consolidated data --
 
 const loadAllData = async () => {
     try {
@@ -377,162 +706,169 @@ const loadAllData = async () => {
     }
 };
 
-// -- Saves processed ticket state (including message count) to JSON --
 
-const saveProcessedTicketsState = () => {
+const getSubscriberCount = async () => {
     try {
-        const data = JSON.stringify(processedTicketsState, null, 2); // Using JSON object now
-        fs.writeFileSync(PROCESSED_TICKETS_STATE_FILE_PATH, data, 'utf8');
+        const cookies = sessionCache;
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
+
+        const response = await axios.get(dashboardUrl, {
+            headers: { 'Cookie': cookieString },
+            timeout: 15000
+        });
+
+        const $ = cheerio.load(response.data);
+        const subscriberCount = $('.infobox-content:contains("active subscribers")')
+            .siblings('.infobox-data-number')
+            .text()
+            .trim();
+
+        return subscriberCount || 'Count not found.';
     } catch (error) {
-        console.error('Error saving processed tickets state:', error.message);
+        console.error('Error fetching subscriber count after retries:', error.message);
+        return 'Could not retrieve count.';
     }
 };
 
 
-// -- Loads previously processed ticket state from JSON on bot startup --
 
-const loadProcessedTicketsState = () => {
+
+
+const handleSubscriberUpdate = async (message) => {
+    const chat = await message.getChat();
     try {
-        if (fs.existsSync(PROCESSED_TICKETS_STATE_FILE_PATH)) {
-            const data = fs.readFileSync(PROCESSED_TICKETS_STATE_FILE_PATH, 'utf8');
-            processedTicketsState = JSON.parse(data);
-            console.log(`Loaded state for ${Object.keys(processedTicketsState).length} processed tickets from file.`);
+        await chat.sendMessage("Username or ID:");
+        const idMessage = await waitForReply(message);
+        const userCode = idMessage.body.trim();
+        if (!userCode) {
+            await chat.sendMessage("Canceled. No ID provided.");
+            return;
+        }
+        const userDataMap = userDataCacheByFile['AllData'];
+        const userData = userDataMap.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
+
+        if (!userData || !userData['Subscriber ID']) {
+            await chat.sendMessage(`Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
+            return;
+        }
+
+        await chat.sendMessage(`Found: *${userData.Username}*\n\nInput New Phone Number:`);
+        const phoneMessage = await waitForReply(message);
+        const newPhoneNumber = phoneMessage.body.trim();
+        if (!/^\d{10}$/.test(newPhoneNumber)) {
+            await chat.sendMessage("Invalid phone number. Please enter a 10-digit number. Operation canceled.");
+            return;
+        }
+
+        await chat.sendMessage(`Input New Email Address:`);
+        const emailMessage = await waitForReply(message);
+        const newEmail = emailMessage.body.trim().toLowerCase();
+        if (!/\S+@\S+\.\S+/.test(newEmail)) {
+            await chat.sendMessage("Invalid email format. Operation canceled.");
+            return;
+        }
+
+        const cookies = sessionCache;
+        const payload = new URLSearchParams({
+            'cnumber': newPhoneNumber,
+            'cemail': newEmail,
+            'id': userData['Subscriber ID'],
+            'railwire_test_name': cookies.railwireCookie.value
+        });
+        const config = {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        };
+        const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+        const responseData = response.data;
+
+        if (responseData && responseData.STATUS === "OK") {
+            await chat.sendMessage(`Details have been updated successfully for *${userData.Username}*!`);
         } else {
-            processedTicketsState = {};
+            const serverStatus = responseData ? responseData.STATUS : "No response";
+            await chat.sendMessage(`Update failed. Server responded: ${serverStatus}`);
         }
+
     } catch (error) {
-        console.error('Error loading processed tickets state:', error.message);
-        processedTicketsState = {};
+        console.error("Error during subscriber update after retries:", error.message);
+        await chat.sendMessage("An unexpected error occurred during the update process.");
     }
 };
 
-// -- Saves ANP down state (which partners are currently down) to JSON file --
 
-const saveAnpDownState = () => {
-    try {
-        const data = JSON.stringify(Array.from(downPartnersState.entries()));
-        fs.writeFileSync(ANP_STATE_FILE_PATH, data, 'utf8');
-    } catch (error) {
-        console.error('Error saving ANP down state:', error.message);
+const handleBulkSubscriberUpdate = async (message) => {
+    const chat = await message.getChat();
+    const userIdentifier = getUserIdentifier(message);
+    const session = userSessions.get(userIdentifier);
+
+    if (!session || !session.userCodes || session.userCodes.length === 0) {
+        await chat.sendMessage("No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
+        return;
     }
-};
+    const { userCodes } = session;
 
-// -- Loads ANP down state from JSON file to maintain state across bot restarts --
-
-const loadAnpDownState = () => {
-    try {
-        if (fs.existsSync(ANP_STATE_FILE_PATH)) {
-            const data = fs.readFileSync(ANP_STATE_FILE_PATH, 'utf8');
-            const entries = JSON.parse(data);
-            const loadedMap = new Map(entries);
-            downPartnersState.clear();
-            for (const [key, value] of loadedMap.entries()) {
-                downPartnersState.set(key, value);
+    for (const userCode of userCodes) {
+        try {
+            const userData = await fetchUserDataFromPortal(userCode);
+            const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
+            if (!subscriberId || !userData.Username) {
+                await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
+                continue;
             }
-            console.log(`Loaded ${downPartnersState.size} down ANP states from file.`);
-        }
-    } catch (error) {
-        console.error('Error loading ANP down state:', error.message);
-    }
-};
 
-// -- Saves the timestamp of the last "still down" ANP report --
+            const newPhoneNumber = generateRandomMobile();
+            const newEmail = generateRandomEmail(userData.Username);
 
-const saveAnpReportState = () => {
-    try {
-        const data = JSON.stringify({ lastStillDownReportTime });
-        fs.writeFileSync(ANP_REPORT_STATE_FILE_PATH, data, 'utf8');
-    } catch (error) {
-        console.error('Error saving ANP report state:', error.message);
-    }
-};
+            const cookies = sessionCache;
+            const payload = new URLSearchParams({
+                'cnumber': newPhoneNumber,
+                'cemail': newEmail,
+                'id': userData['Subscriber ID'],
+                'railwire_test_name': cookies.railwireCookie.value
+            });
+            const config = {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+                }
+            };
+            const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
+            const responseData = response.data;
 
-// -- Loads the timestamp of the last "still down" ANP report from file --
-
-const loadAnpReportState = () => {
-    try {
-        if (fs.existsSync(ANP_REPORT_STATE_FILE_PATH)) {
-            const data = fs.readFileSync(ANP_REPORT_STATE_FILE_PATH, 'utf8');
-            const state = JSON.parse(data);
-            if (state && typeof state.lastStillDownReportTime === 'number') {
-                lastStillDownReportTime = state.lastStillDownReportTime;
-                console.log(`Loaded last ANP report time: ${new Date(lastStillDownReportTime).toLocaleString()}`);
+            if (responseData && responseData.STATUS === "OK") {
+            let reply = `*Username:* ${userData.Username}\n`;
+                reply += `*Mobile No.:* ${newPhoneNumber}\n`;
+                reply += `*Email ID:* ${newEmail}\n\n`;
+                reply += `Details have been updated successfully.`;
+                await chat.sendMessage(reply);
+            } else {
+                const serverStatus = responseData ? responseData.STATUS : "No response";
+                await chat.sendMessage(`Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
             }
+        } catch (error) {
+            console.error(`Error during bulk update for ${userCode} after retries:`, error.message);
+            await chat.sendMessage(`An error occurred while processing *${userCode}*.`);
         }
-    } catch (error) {
-        console.error('Error loading ANP report state:', error.message);
+        await new Promise(resolve => setTimeout(resolve, 10));
     }
+    userSessions.delete(userIdentifier);
+    await chat.sendMessage("Bulk update process finished.");
 };
 
-// -- Creates a CSV string from the filtered active subscriber data --
 
-const createActiveCSV = (data) => {
-const headers = [
-    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
-    'District', 'Cluster', 'Marketing Team', 'Marketing Team No.', 'Mobile Number', 'Package Name',
-    'Balance', 'Conversation Remark', 'Final Remark'
-];
-    
-    let csv = headers.join(',') + '\n';
-    data.forEach(row => {
-        const values = headers.map(header => {
-            const stringValue = (row[header] || '').toString(); 
-            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
-        });
-        csv += values.join(',') + '\n';
+const baseURL = 'https://jh.railwire.co.in';
+const mainURL = `${baseURL}/billcntl/kycpending`;
+let jhCodeMap = null;
+
+const generateQRCode = (qr) => {
+    console.log('Scan the QR code below to login:');
+    qrcode.generate(qr, {
+        small: true
     });
-    
-    return csv;
 };
-
-// -- Creates a CSV string from the filtered inactive subscriber data --
-
-const createInactiveCSV = (data) => {
-const headers = [
-    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
-    'Date', 'District', 'Cluster', 'Marketing Team', 'Marketing Team No.', 'Mobile Number',
-    'Conversation Remark', 'Final Remark'
-];
-    
-    let csv = headers.join(',') + '\n';
-    data.forEach(row => {
-        const values = headers.map(header => {
-            const stringValue = (row[header] || '').toString();
-            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
-        });
-        csv += values.join(',') + '\n';
-    });
-    
-    return csv;
-};
-
-// -- Loads ANP subscriber counts from JSON file --
-const loadAnpCountsState = () => {
-    try {
-        if (fs.existsSync(ANP_COUNTS_STATE_FILE_PATH)) {
-            const data = fs.readFileSync(ANP_COUNTS_STATE_FILE_PATH, 'utf8');
-            return JSON.parse(data);
-        }
-    } catch (error) {
-        console.error('Error loading ANP counts state:', error.message);
-    }
-    return {}; // Return empty object if file doesn't exist or fails
-};
-
-// -- Saves ANP subscriber counts to JSON file --
-const saveAnpCountsState = (data) => {
-    try {
-        fs.writeFileSync(ANP_COUNTS_STATE_FILE_PATH, JSON.stringify(data, null, 2), 'utf8');
-    } catch (error) {
-        console.error('Error saving ANP counts state:', error.message);
-    }
-};
-
-/* ----------------------------------------------------------------
-Section 4: Authentication & Session Management
-------------------------------------------------------------------- */
-
-// -- Performs API-based authentication encryption --
 
 const authenticate = async (username, password) => {
     return retryOperation(async () => {
@@ -616,7 +952,6 @@ const authenticate = async (username, password) => {
                 baseurl: '',
             });
 
-            console.log('[authenticate] Sending login form data:', { railwire_test_name: railwireTestToken, username, code: captchaText });
             const loginResponse = await axios.post(`${baseURL}/rlogin`, loginFormData.toString(), {
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -659,22 +994,6 @@ const authenticate = async (username, password) => {
         }
     });
 };
-
-// -- Generic utility function to retry an asynchronous operation multiple times on failure --
-
-async function retryOperation(operation, maxRetries = 5, delay = 1000) { 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-            return await operation();
-        } catch (error) {
-            if (attempt === maxRetries) throw error;
-            console.log(`Operation failed on attempt ${attempt}. Retrying...`);
-            await new Promise(resolve => setTimeout(resolve, delay * attempt));
-        }
-    }
-}
-
-// -- Authenticates with the NMS (Network Management System) by first extracting credentials from the billing portal session --
 
 const getNmsSessionFromPortal = async (portalCookies) => {
     try {
@@ -735,40 +1054,20 @@ const getNmsSessionFromPortal = async (portalCookies) => {
     }
 };
 
-/* ----------------------------------------------------------------
-Section 5: Billing Portal (Subscriber & Partner) Features
-------------------------------------------------------------------- */
-
-// -- Fetches the current count of active subscribers from the Railwire billing portal dashboard --
-
-const getSubscriberCount = async () => {
-    try {
-        const cookies = sessionCache;
-        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-        const dashboardUrl = 'https://jh.railwire.co.in/billcntl';
-
-        const response = await axios.get(dashboardUrl, {
-            headers: { 'Cookie': cookieString },
-            timeout: 15000
-        });
-
-        const $ = cheerio.load(response.data);
-        const subscriberCount = $('.infobox-content:contains("active subscribers")')
-            .siblings('.infobox-data-number')
-            .text()
-            .trim();
-
-        return subscriberCount || 'Count not found.';
-    } catch (error) {
-        console.error('Error fetching subscriber count after retries:', error.message);
-        return 'Could not retrieve count.';
+async function retryOperation(operation, maxRetries = 5, delay = 1000) { 
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await operation();
+        } catch (error) {
+            if (attempt === maxRetries) throw error;
+            console.log(`Operation failed on attempt ${attempt}. Retrying...`);
+            await new Promise(resolve => setTimeout(resolve, delay * attempt));
+        }
     }
-};
+}
 
-// -- Fetches a subscriber's details (ID, username, mobile, name) from the Railwire billing portal --
 
 async function fetchUserDataFromPortal(userCode) {
-    console.log(`[LiveFetch] User "${userCode}" not in cache. Fetching from portal...`);
     try {
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
@@ -826,8 +1125,6 @@ async function fetchUserDataFromPortal(userCode) {
             name: name
         };
 
-        console.log(`[LiveFetch] ${userData ? 'Successfully found' : 'Failed to find'} live data for "${userCode}".`);
-
         return userData ? {
             Username: userData.username,
             MobileNo: userData.mobileNo,
@@ -840,14 +1137,10 @@ async function fetchUserDataFromPortal(userCode) {
     }
 }
 
-// -- Clears the RADIUS session for a given subscriber ID --
-
 const resetSession = async (userData) => {
     try {
         const cookies = sessionCache;
         const payload = `uname=${userData.Username}&railwire_test_name=${cookies.railwireCookie.value}`;
-        console.log(`[resetSession] Sending payload: ${payload}`);
-
         const config = {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -871,14 +1164,11 @@ const resetSession = async (userData) => {
     }
 };
 
-// -- Activates or Deactivates a subscriber account by toggling the expiry date --
-
 const DeactivateID = async (userData) => {
     try {
         const cookies = sessionCache;
         const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
         const payload = `subid=${subscriberId}&railwire_test_name=${cookies.railwireCookie.value}`;
-        console.log(`[DeactivateID] Sending payload: ${payload}`);
         const config = {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -895,8 +1185,6 @@ const DeactivateID = async (userData) => {
     }
 };
 
-// -- Resets both the billing portal and PPPoE password for a given subscriber --
-
 const resetPassword = async (userData) => {
     try {
         const cookies = sessionCache;
@@ -907,8 +1195,7 @@ const resetPassword = async (userData) => {
             }
         };
         const subscriberId = userData['Subscriber ID'] || userData.SubscriberId;
-        const basePayload = `subid=${subscriberId}&mobileno=${userData['MobileNo'] || userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
-        console.log(`[resetPassword] Sending payload: ${basePayload}`);
+        const basePayload = `subid=${subscriberId}&mobileno=${userData.MobileNo}&railwire_test_name=${cookies.railwireCookie.value}`;
         const [portalRes, pppoeRes] = await Promise.all([
             axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Bill`, config),
             axios.post('https://jh.railwire.co.in/subapis/subpassreset', `${basePayload}&flag=Internet`, config)
@@ -924,470 +1211,30 @@ const resetPassword = async (userData) => {
     }
 };
 
+const getUserIdentifier = (message) => {
+    return message.fromMe ? message.to : (message.author || message.from);
+};
 
-// -- Handles the interactive workflow for changing a single subscriber's mobile number and email ID --
-
-const handleSubscriberUpdate = async (message) => {
-    const chat = await message.getChat();
-
-    try {
-        // 1. Ask for Username or Subscriber ID
-        await chat.sendMessage("Enter Username or ID:");
-        const idMessage = await waitForReply(message);
-        const userCode = idMessage.body.trim();
-        if (!userCode) {
-            await chat.sendMessage("❌ Canceled. No ID provided.");
-            return;
-        }
-
-
-        // 2. Fetch user data (Excel first, then live portal as a fallback)
-        const userData = subscriberDataCache.get(normalize(userCode)) || await fetchUserDataFromPortal(userCode);
-
-        // 3. Validate if user was found
-        if (!userData || !(userData['Subscriber ID'] || userData.SubscriberId)) {
-            await chat.sendMessage(`❌ Could not find a subscriber with the ID "${userCode}". Please check and try again.`);
-            return;
-        }
-
-        // 4. Ask for the new Phone Number
-        await chat.sendMessage(`Found: *${userData.Username}*\n\nEnter the new Phone Number:`);
-        const phoneMessage = await waitForReply(message);
-        const newPhoneNumber = phoneMessage.body.trim();
-        if (!/^\d{10}$/.test(newPhoneNumber)) {
-            await chat.sendMessage("❌ Invalid phone number. Please enter a 10-digit number. Operation canceled.");
-            return;
-        }
-
-        // 5. Ask for the new Email Address
-        await chat.sendMessage(`Enter the new Email Address:`);
-        const emailMessage = await waitForReply(message);
-        const newEmail = emailMessage.body.trim().toLowerCase();
-        if (!/\S+@\S+\.\S+/.test(newEmail)) {
-            await chat.sendMessage("❌ Invalid email format. Operation canceled.");
-            return;
-        }
-
-        // 6. Perform the update via API call
-        const cookies = sessionCache
-        if (!cookies) {
-            await chat.sendMessage("❌ Authentication failed. Cannot proceed.");
-            return;
-        }
-
-        const payload = new URLSearchParams({
-            'cnumber': newPhoneNumber,
-            'cemail': newEmail,
-            'id': userData['Subscriber ID'] || userData.SubscriberId,
-            'railwire_test_name': cookies.railwireCookie.value
-        });
-
-        const config = {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+const waitForReply = async (originalMessage) => {
+    const userIdentifier = getUserIdentifier(originalMessage);
+    return new Promise((resolve) => {
+        const listener = (message) => {
+            if (getUserIdentifier(message) === userIdentifier) {
+                client.removeListener('message', listener);
+                resolve(message);
             }
         };
-
-        console.log(`[handleSubscriberUpdate] Sending payload:`, Object.fromEntries(payload));
-        const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
-
-        // 7. Confirm the result to the user
-        if (response.data && response.data.STATUS === "OK") {
-            await chat.sendMessage(`✅ Details have been updated successfully for *${userData.Username}*!`);
-        } else {
-            const serverStatus = response.data ? response.data.STATUS : "No response";
-            await chat.sendMessage(`❌ Update failed. Server responded: ${serverStatus}`);
-        }
-
-    } catch (error) {
-        console.error("Error during subscriber update:", error.message);
-        await chat.sendMessage("❌ An unexpected error occurred during the update process.");
-    }
+        client.on('message', listener);
+    });
 };
-
-// -- Handles the command to update the mobile number and email ID for a list of subscribers using random data --
-
-const handleBulkSubscriberUpdate = async (message) => {
-    const chat = await message.getChat();
-    const userIdentifier = getUserIdentifier(message);
-    const session = userSessions.get(userIdentifier);
-
-    // 1. Check if there are any user codes in the session
-    if (!session || !session.userCodes || session.userCodes.length === 0) {
-        await chat.sendMessage("❌ No usernames or IDs found.\nPlease send a list of usernames/IDs first, then type `bulksubupdate`.");
-        return;
-    }
-
-    const {
-        userCodes
-    } = session;
-
-    const cookies = sessionCache
-    if (!cookies) {
-        await chat.sendMessage("❌ Authentication failed. Cannot proceed.");
-        userSessions.delete(userIdentifier);
-        return;
-    }
-
-    // 2. Loop through each user code from the session
-    for (const userCode of userCodes) {
-        try {
-            // Fetch live user data to get both SubscriberId and Username
-            const userData = subscriberDataCache.get(userCode) || await fetchUserDataFromPortal(userCode);
-
-            if (!userData || !(userData['Subscriber ID'] || userData.SubscriberId) || !userData.Username) {
-                await chat.sendMessage(`❌ Could not find subscriber: *${userCode}*. Skipping.`);
-                continue; // Move to the next user in the loop
-            }
-
-            // 3. Generate random details for this user
-            const newPhoneNumber = generateRandomMobile();
-            const newEmail = generateRandomEmail(userData.Username);
-
-            // 4. Perform the update (reusing logic from the single update function)
-            const payload = new URLSearchParams({
-                'cnumber': newPhoneNumber,
-                'cemail': newEmail,
-                'id': userData['Subscriber ID'] || userData.SubscriberId,
-                'railwire_test_name': cookies.railwireCookie.value
-            });
-
-            const config = {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-                }
-            };
-
-            console.log(`[handleBulkSubscriberUpdate] Sending payload for ${userCode}:`, Object.fromEntries(payload));
-            const response = await axios.post('https://jh.railwire.co.in/billcntl/resetsdetail', payload.toString(), config);
-
-            // 5. Send feedback to the user
-            if (response.data && response.data.STATUS === "OK") {
-                let reply = `*Username:* ${userData.Username}\n`;
-                reply += `*New Mobile No.:* ${newPhoneNumber}\n`;
-                reply += `*New Email ID:* ${newEmail}\n\n`;
-                reply += `✅ Details have been updated successfully.`;
-                await chat.sendMessage(reply);
-            } else {
-                const serverStatus = response.data ? response.data.STATUS : "No response";
-                await chat.sendMessage(`❌ Update failed for *${userData.Username}*. Server responded: ${serverStatus}`);
-            }
-
-        } catch (error) {
-            console.error(`Error during bulk update for ${userCode}:`, error.message);
-            await chat.sendMessage(`❌ An error occurred while processing *${userCode}*.`);
-        }
-
-        // Add a small delay to avoid spamming the server
-        await new Promise(resolve => setTimeout(resolve, 100));
-    }
-
-    // 6. Clean up the session after the process is complete
-    userSessions.delete(userIdentifier);
-    await chat.sendMessage("✅ Bulk update process finished.");
-};
-
-// -- Searches for and displays subscriber details from the local cache --
-
-const handleSubscriberSearch = async (message, searchTerm) => {
-    const chat = await message.getChat();
-
-    if (!searchTerm) {
-        await chat.sendMessage("Search term cannot be empty. Please try again by typing `search <username>`.");
-        return;
-    }
-
-    // Check if the data cache is loaded and ready
-    if (!subscriberDataCache || subscriberDataCache.size === 0) {
-        console.error("Attempted to search before subscriberDataCache was loaded or the file is empty.");
-        return;
-    }
-
-    // Normalize the search term and look it up in the cache
-    const normalizedTerm = normalize(searchTerm);
-    const result = subscriberDataCache.get(normalizedTerm);
-
-    if (result) {
-        // If a match is found, format the details into a reply
-        let reply = `*Subscriber Details*\n\n`;
-        reply += `*Subscriber ID:* ${result['Subscriber ID'] || 'N/A'}\n`;
-        reply += `*Username:* ${result['Username'] || 'N/A'}\n`;
-        reply += `*MobileNo:* ${result['MobileNo'] || 'N/A'}\n`;
-        reply += `*ANP ID:* ${result['ANP ID'] || 'N/A'}\n`;
-        reply += `*ANP Name:* ${result['ANP Name'] || 'N/A'}\n`;
-        reply += `*District:* ${result['District'] || 'N/A'}\n`;
-        reply += `*Cluster:* ${result['Cluster'] || 'N/A'}\n`;
-        reply += `*Stack VLAN:* ${result['Stack VLAN'] || 'N/A'}\n`;
-        reply += `*Customer VLAN:* ${result['Customer VLAN'] || 'N/A'}\n`;
-        reply += `*JH Code:* ${result['JH Code'] || 'N/A'}\n`;
-        reply += `*Subscriber Count:* ${result['Subscriber Count'] || 'N/A'}\n`;
-        reply += `*Primary Port:* ${result['Port'] || 'N/A'}\n`;
-        reply += `*Backup Port:* ${result['Backup Port'] || 'N/A'}\n`;
-        reply += `*BNG:* ${result['BNG'] || 'N/A'}\n`;
-        reply += `*Marketing Team:* ${result['Marketing Team'] || 'N/A'}\n`;
-        reply += `*Marketing Team No.:* ${result['Marketing Team No.'] || 'N/A'}\n`;
-
-        await chat.sendMessage(reply);
-    } else {
-        // If no match is found, inform the user
-        await chat.sendMessage(`No subscriber found for "${searchTerm}".`);
-    }
-};
-
-// -- Handles the interactive workflow for updating an ANP's mobile number, email, and optionally bank details --
-
-const handleAnpUpdate = async (message) => {
-    const chat = await message.getChat();
-
-    try {
-        // Part 1 & 2: Find the ANP and gather new info
-        await chat.sendMessage("Enter Partner Name or ID:");
-        const searchTerm = (await waitForReply(message)).body.trim();
-        if (!searchTerm) {
-            await chat.sendMessage("❌ Canceled. No search term provided.");
-            return;
-        }
-
-        const cookies = sessionCache;
-        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-        const listUrl = `${baseURL}/billcntl/billpartners`;
-
-        const listResponse = await axios.get(listUrl, {
-            headers: {
-                'Cookie': cookieString
-            }
-        });
-        const $ = cheerio.load(listResponse.data);
-
-        let match = null;
-        let multipleMatches = [];
-        const normalizedSearch = normalize(searchTerm);
-
-        $('table#dynamic-table tbody tr').each(function() {
-            const row = $(this);
-            const partnerId = normalize(row.find('td').eq(0).text());
-            const companyName = normalize(row.find('td').eq(1).find('a').text());
-
-            if (partnerId === normalizedSearch || companyName === normalizedSearch) {
-                const foundMatch = {
-                    name: row.find('td').eq(1).find('a').text().trim(),
-                    id: row.find('td').eq(0).text().trim(),
-                    link: row.find('td').eq(1).find('a').attr('href')
-                };
-                multipleMatches.push(foundMatch);
-            }
-        });
-
-        if (multipleMatches.length === 0) {
-            await chat.sendMessage(`❌ No ANP found matching "${searchTerm}".`);
-            return;
-        } else if (multipleMatches.length > 1) {
-            await chat.sendMessage(`❌ Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
-            return;
-        } else {
-            match = multipleMatches[0];
-            console.log('[handleAnpUpdate] Found partner match:', match);
-        }
-
-        await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
-        const phoneMessage = await waitForReply(message);
-        const newPhoneNumber = phoneMessage.body.trim();
-        if (!/^\d{10}$/.test(newPhoneNumber)) {
-            await chat.sendMessage("❌ Invalid phone number. Operation canceled.");
-            return;
-        }
-
-        await chat.sendMessage(`Input New Email ID:`);
-        const emailMessage = await waitForReply(message);
-        const newEmail = emailMessage.body.trim().toLowerCase();
-        if (!/\S+@\S+\.\S+/.test(newEmail)) {
-            await chat.sendMessage("❌ Invalid email format. Operation canceled.");
-            return;
-        }
-
-        await chat.sendMessage(`Everything correct? (yes/no)`);
-        const bankReply = await waitForReply(message);
-        const updateBankDetails = bankReply.body.trim().toLowerCase() === 'yes';
-
-        // Part 3: Scrape detail page
-        const detailUrl = baseURL + match.link;
-        const detailResponse = await axios.get(detailUrl, {
-            headers: {
-                'Cookie': cookieString
-            }
-        });
-        const $$ = cheerio.load(detailResponse.data);
-
-        const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
-        const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
-        const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
-
-        let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
-        let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
-
-        const payload = {
-            'railwire_test_name': cookies.railwireCookie.value,
-            'partnerid': scrapeHidden('partnerid'),
-            'cname': scrapeValue("Company Name"),
-            'cregno': scrapeValue("Company Registration Number"),
-            'caddress': scrapeHtml('caddress'),
-            'cmanager': scrapeValue("Contact Person"),
-            'cnumber': newPhoneNumber,
-            'cemail': newEmail,
-            'agreementdate': scrapeValue("Railwire Agreement Date"),
-            'agreementno': scrapeValue("Railwire Agreement No"),
-            'pancard': scrapeHidden('pancard'),
-            'bank_acholder': scrapeValue("Bank Account Holder Name"),
-            'bank_actype': scrapeValue("Bank Account Type"),
-            'bank_name': scrapeHtml('bank_name'),
-            'bank_branch': scrapeHtml('bank_branch'),
-            'bank_acno': scrapeValue("Bank Account No"),
-            'bank_ifsc': scrapeHidden('bank_ifsc'),
-            'gstin': gstin,
-            'sacno': scrapeValue("SAC No"),
-            'ptype': scrapeHtml('ptype'),
-            'gst_status': scrapeHidden("gststatus1"),
-            'legalname': scrapeHidden("legalnameval"),
-            'tradename': scrapeHidden("tradenameval"),
-            'ptnrattid': scrapeHtml('ptnrattid'),
-            'ptnrlang': scrapeHtml('ptnrlang'),
-            'territory_name': scrapeHidden('territory_name'),
-            'ring': scrapeValue("Ring"),
-            'brasip': scrapeValue("BRAS IP"),
-            'switchip': scrapeValue("Switch IP"),
-            'dropping': scrapeValue("Dropping"),
-            'interface': scrapeValue("Interface"),
-            'port_number': scrapeValue("Port Number"),
-            'pop_name': scrapeValue("Pop Name"),
-            'pop_pincode': scrapeValue("Pop Pin Code"),
-            'ngcomany': scrapeHidden('ngcomany'),
-            'brmobile': updateBankDetails ? newPhoneNumber : scrapeValue("Bank Registered Mobile No"),
-            'bremail': updateBankDetails ? newEmail : scrapeValue("Bank Registered Email ID"),
-            'reject_remark': "",
-            'onlinesub': "0",
-            'taxpayertype': 0,
-            'loc_type': null,
-            'onrechargeatom': 0,
-            'bankcheck': '1',
-            'subonrechargerazorpay': 0
-        };
-
-        // --- Part 4: Display ALL data for confirmation, just like the JS snippet ---
-        let confirmationMessage = `*Confirm Details*\n_Changes are highlighted in bold._\n\n`;
-        confirmationMessage += `*Partner ID:* ${payload.partnerid}\n`;
-        confirmationMessage += `*Company Name:* ${payload.cname}\n`;
-        confirmationMessage += `*Nature of Co:* ${payload.ngcomany}\n`;
-        confirmationMessage += `*Company Reg No:* ${payload.cregno}\n`;
-        confirmationMessage += `*Address:* ${payload.caddress}\n`;
-        confirmationMessage += `*Contact Person:* ${payload.cmanager}\n`;
-        confirmationMessage += `*Phone:* *${payload.cnumber}*\n`;
-        confirmationMessage += `*Email Address:* *${payload.cemail}*\n`;
-        confirmationMessage += `*PAN Card:* ${payload.pancard}\n`;
-        confirmationMessage += `*Agreement Date:* ${payload.agreementdate}\n`;
-        confirmationMessage += `*Agreement No:* ${payload.agreementno}\n`;
-        confirmationMessage += `*Partner Type:* ${payload.ptype}\n`;
-        confirmationMessage += `*Territory:* ${payload.territory_name}\n\n`;
-        confirmationMessage += `--- *GST Details* ---\n`;
-        confirmationMessage += `*GSTIN:* ${payload.gstin}\n`;
-        confirmationMessage += `*GST Legal Name:* ${payload.legalname}\n`;
-        confirmationMessage += `*GST Trade Name:* ${payload.tradename}\n`;
-        confirmationMessage += `*GST Status:* ${payload.gst_status}\n`;
-        confirmationMessage += `*SAC No:* ${payload.sacno}\n\n`;
-        confirmationMessage += `--- *Bank Details* ---\n`;
-        confirmationMessage += `*Bank Holder:* ${payload.bank_acholder}\n`;
-        confirmationMessage += `*Bank Acct Type:* ${payload.bank_actype}\n`;
-        confirmationMessage += `*Bank Name:* ${payload.bank_name}\n`;
-        confirmationMessage += `*Bank Branch:* ${payload.bank_branch}\n`;
-        confirmationMessage += `*Bank Acct No:* ${payload.bank_acno}\n`;
-        confirmationMessage += `*Bank IFSC:* ${payload.bank_ifsc}\n`;
-        confirmationMessage += `*Bank Mobile:* ${updateBankDetails ? `*${payload.brmobile}*` : payload.brmobile}\n`;
-        confirmationMessage += `*Bank Email:* ${updateBankDetails ? `*${payload.bremail}*` : payload.bremail}\n\n`;
-        confirmationMessage += `--- *Technical Details* ---\n`;
-        confirmationMessage += `*Ring:* ${payload.ring}\n`;
-        confirmationMessage += `*BRAS IP:* ${payload.brasip}\n`;
-        confirmationMessage += `*Switch IP:* ${payload.switchip}\n`;
-        confirmationMessage += `*Dropping:* ${payload.dropping}\n`;
-        confirmationMessage += `*Interface:* ${payload.interface}\n`;
-        confirmationMessage += `*Port Number:* ${payload.port_number}\n`;
-        confirmationMessage += `*POP Name:* ${payload.pop_name}\n`;
-        confirmationMessage += `*POP Pincode:* ${payload.pop_pincode}\n`;
-
-        await chat.sendMessage(confirmationMessage);
-        await chat.sendMessage("Correct? Type *yes* to submit, or anything else to cancel.");
-        const finalConfirmation = await waitForReply(message);
-
-        // --- Part 5: Final Submission ---
-        if (finalConfirmation.body.trim().toLowerCase() === 'yes') {
-            const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
-            const updateResponse = await axios.post(updateUrl, new URLSearchParams(payload), {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': cookieString
-                }
-            });
-
-            console.log('[handleAnpUpdate] Sending final ANP update payload:', payload);
-
-            if (updateResponse.data && (updateResponse.data.STATUS === "OK" || updateResponse.data.STATUS === "BANK VERIFIED")) {
-                await chat.sendMessage(`✅ ANP details updated successfully for *${match.name}*!`);
-            } else {
-                const errorMsg = updateResponse.data ? (updateResponse.data.MESSAGE || updateResponse.data.STATUS) : "Unknown error";
-                await chat.sendMessage(`❌ Update failed for *${match.name}*. Server response: ${errorMsg}`);
-            }
-        } else {
-            await chat.sendMessage("❌ Update canceled by user. No changes were made.");
-            return;
-        }
-
-    } catch (error) {
-        console.error("Error during ANP update:", error.message);
-        await chat.sendMessage("❌ An unexpected error occurred during the ANP update process.");
-    }
-};
-
-
-// -- Submits the API request to change a subscriber's package plan --
-
-async function ChangePlan(formData) {
-    try {
-        const cookies = sessionCache;
-        const url = 'https://jh.railwire.co.in/finapis/msp_plan_applynow';
-        const payload = {
-            verifyHidden: formData.verifyHidden,
-            subid: formData.subid,
-            pkgid: formData.pkgid,
-            status: formData.status,
-            uname: formData.username,
-            oldpkgid: formData.oldpkgid,
-            railwire_test_name: cookies.railwireCookie.value
-        };
-        console.log(`[ChangePlan] Sending payload for ${formData.username}:`, payload);
-        const response = await axios.post(url, new URLSearchParams(payload).toString(), {
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-            }
-        });
-        const responseData = response.data;
-        console.log(`Plan changed : "${responseData.STATUS}"`);
-        return responseData.STATUS === 'OK';
-    } catch (error) {
-        console.error('\n❌ Error changing plan after retries:', error.message);
-        return false;
-    }
-}
-
-// -- Handles the command to change the package plan for one or more subscribers --
 
 const handlePlanChange = async (message) => {
     const chat = await message.getChat();
     const messageBody = message.body;
 
-    const usernamePattern = /(?<!\/)\b(jh(\.[\w-]+)+)\b/gi;
-    const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
-    const packageIdPattern = /\b\d{5,6}\b/g;
+    const usernamePattern = /jh[\.\w]+/gi;
+    const subscriberIdPattern = /\b\d{5,}\b/g;
+    const packageIdPattern = /\b\d{3,6}\b/g;
 
     const usernames = messageBody.match(usernamePattern) || [];
     const subscriberIds = messageBody.match(subscriberIdPattern) || [];
@@ -1477,18 +1324,610 @@ const handlePlanChange = async (message) => {
     }
 };
 
-// -- Filters the Active Subscriber CSV report based on package and balance criteria and sends the resulting CSV --
+const handleSubscriberSearch = async (message, searchTerm) => {
+    const chat = await message.getChat();
 
+    if (!searchTerm) {
+        await chat.sendMessage("Search term cannot be empty. Please try again by typing `search <username>`.");
+        return;
+    }
+
+    // Check if the data cache is loaded and ready
+    if (!subscriberDataCache || subscriberDataCache.size === 0) {
+        console.error("Attempted to search before subscriberDataCache was loaded or the file is empty.");
+        return;
+    }
+
+    // Normalize the search term and look it up in the cache
+    const normalizedTerm = normalize(searchTerm);
+    const result = subscriberDataCache.get(normalizedTerm);
+
+    if (result) {
+        // If a match is found, format the details into a reply
+        let reply = `*Subscriber Details*\n\n`;
+        reply += `*Subscriber ID:* ${result['Subscriber ID'] || 'N/A'}\n`;
+        reply += `*Username:* ${result['Username'] || 'N/A'}\n`;
+        reply += `*ANP ID:* ${result['ANP ID'] || 'N/A'}\n`;
+        reply += `*ANP Name:* ${result['ANP Name'] || 'N/A'}\n`;
+        reply += `*District:* ${result['District'] || 'N/A'}\n`;
+        reply += `*Stack VLAN:* ${result['Stack VLAN'] || 'N/A'}\n`;
+        reply += `*Customer VLAN:* ${result['Customer VLAN'] || 'N/A'}\n`;
+        reply += `*JH Code:* ${result['JH Code'] || 'N/A'}\n`;
+        reply += `*Subscriber Count:* ${result['Subscriber Count'] || 'N/A'}\n`;
+        reply += `*Primary Port:* ${result['Port'] || 'N/A'}\n`;
+        reply += `*Backup Port:* ${result['Backup Port'] || 'N/A'}\n`;
+        reply += `*BNG:* ${result['BNG'] || 'N/A'}\n`;
+        reply += `*Marketing Team:* ${result['Marketing Team'] || 'N/A'}\n`;
+        reply += `*Marketing Team No.:* ${result['Marketing Team No.'] || 'N/A'}\n`;
+
+        await chat.sendMessage(reply);
+    } else {
+        // If no match is found, inform the user
+        await chat.sendMessage(`❌ No subscriber found for "${searchTerm}".`);
+    }
+};
+
+async function login() {
+    try {
+        const response = await axios.post('http://apiv1.inteligo.tech/api/OTT/GSignin', {
+            UserName: 'JH-MSP',
+            Platform: 'GPanel',
+            Password: 'WfGMAkmJtRundSrD7r/MQA==',
+            IPAddress: ''
+        });
+
+        return response.data; // Should contain UserId
+    } catch (error) {
+        console.error('Login failed:', error.message);
+        throw error;
+    }
+}
+
+
+const checkComplaintStatus = async (message) => {
+    const chat = await message.getChat();
+
+    // Step 1: Ask for Complaint Number
+    await chat.sendMessage("🔢 Complaint No:");
+    const compNoMsg = await waitForReply(message);
+    const complaintNumber = parseInt(compNoMsg.body.trim());
+
+    if (isNaN(complaintNumber)) {
+        await chat.sendMessage("Invalid Complaint Number.");
+        return;
+    }
+
+    // Step 2: Login to get UserId
+    let loginResult;
+    try {
+        loginResult = await login();
+    } catch (err) {
+        await chat.sendMessage("Failed to authenticate with backend.");
+        return;
+    }
+
+    // Step 3: Fetch all complaints
+    try {
+        const complaintsResponse = await axios.post(
+            `http://apiv1.inteligo.tech/api/OTT/GGetOTTComplaintList?UserID=${loginResult.UserId}`,
+            loginResult.UserId
+        );
+
+        const complaints = complaintsResponse.data;
+
+        // Step 4: Find the complaint
+        const complaint = complaints.find(c => c.ComplaintNumber === complaintNumber);
+
+        if (!complaint) {
+            await chat.sendMessage(`No complaint found with number ${complaintNumber}`);
+            return;
+        }
+
+        // Step 5: Format and send response in your desired format
+        const statusMap = {
+            'Closed': '✅',
+            'OnHold': '⏸️',
+            'Open': '🔄'
+        };
+
+        const statusEmoji = statusMap[complaint.Status] || 'ℹ️';
+        const remark = complaint.Remark ? complaint.Remark : "No remarks provided.";
+
+        let reply = "*Complaint Status*\n\n";
+        reply += `*Complaint Number:* ${complaint.ComplaintNumber}\n`;
+        reply += `*Username:* ${complaint.Username}\n`;
+        reply += `*Status:* ${statusEmoji} ${complaint.Status}\n`;
+        reply += `*Service:* ${complaint.ServiceProvider}\n\n`;
+        reply += `*Remark:* ${remark}`;
+
+        await chat.sendMessage(reply);
+
+    } catch (error) {
+        await chat.sendMessage(`❌ Error fetching complaint.\n\nError: ${error.message}`);
+    }
+};
+
+const handleAnpUpdate = async (message) => {
+    const chat = await message.getChat();
+    try {
+        await chat.sendMessage("Enter Partner Name or ID:");
+        const searchTerm = (await waitForReply(message)).body.trim();
+        if (!searchTerm) {
+            await chat.sendMessage("❌ Canceled. No search term provided.");
+            return;
+        }
+
+        const cookies = sessionCache;
+        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+        const listUrl = `${baseURL}/billcntl/billpartners`;
+        const listResponse = await axios.get(listUrl, { headers: { 'Cookie': cookieString } });
+        const $ = cheerio.load(listResponse.data);
+        let foundMatch = null;
+        let multipleMatches = [];
+        const normalizedSearch = normalize(searchTerm);
+        $('table#dynamic-table tbody tr').each(function () {
+            const row = $(this);
+            const partnerId = normalize(row.find('td').eq(0).text());
+            const companyName = normalize(row.find('td').eq(1).find('a').text());
+            if (partnerId === normalizedSearch || companyName === normalizedSearch) {
+                multipleMatches.push({
+                    name: row.find('td').eq(1).find('a').text().trim(),
+                    id: row.find('td').eq(0).text().trim(),
+                    link: row.find('td').eq(1).find('a').attr('href')
+                });
+            }
+        });
+
+        if (multipleMatches.length === 0) {
+            await chat.sendMessage(`No ANP found matching "${searchTerm}".`);
+            return;
+        }
+        if (multipleMatches.length > 1) {
+            await chat.sendMessage(`Found multiple ANPs. Please be more specific:\n- ${multipleMatches.map(m => m.name).join('\n- ')}`);
+            return;
+        }
+        foundMatch = multipleMatches[0];
+
+        const detailUrl = baseURL + foundMatch.link;
+        const detailResponse = await axios.get(detailUrl, { headers: { 'Cookie': cookieString } });
+        const $$ = cheerio.load(detailResponse.data);
+        const scrapeValue = (label) => $$('.profile-info-name:contains("' + label + '")').next().find('span.editable').text().trim();
+        const scrapeHidden = (id) => $$(`#${id}`).val()?.trim() || '';
+        const scrapeHtml = (id) => $$(`#${id}`).html()?.trim() || '';
+        let gstin_raw = ($$('.profile-info-name:contains("GSTIN No")').next().text().trim() || scrapeHidden("gstinval")).trim();
+        let gstin = (gstin_raw.startsWith('undefined') || gstin_raw === "") ? " " : gstin_raw;
+
+        const payloadData = {
+            'railwire_test_name': cookies.railwireCookie.value,
+            'partnerid': scrapeHidden('partnerid'), 'cname': scrapeValue("Company Name"), 'cregno': scrapeValue("Company Registration Number"),
+            'caddress': scrapeHtml('caddress'), 'cmanager': scrapeValue("Contact Person"), 'agreementdate': scrapeValue("Railwire Agreement Date"),
+            'agreementno': scrapeValue("Railwire Agreement No"), 'pancard': scrapeHidden('pancard'), 'bank_acholder': scrapeValue("Bank Account Holder Name"),
+            'bank_actype': scrapeValue("Bank Account Type"), 'bank_name': scrapeHtml('bank_name'), 'bank_branch': scrapeHtml('bank_branch'),
+            'bank_acno': scrapeValue("Bank Account No"), 'bank_ifsc': scrapeHidden('bank_ifsc'), 'gstin': gstin, 'sacno': scrapeValue("SAC No"),
+            'ptype': scrapeHtml('ptype'), 'gst_status': scrapeHidden("gststatus1"), 'legalname': scrapeHidden("legalnameval"),
+            'tradename': scrapeHidden("tradenameval"), 'ptnrattid': scrapeHtml('ptnrattid'), 'ptnrlang': scrapeHtml('ptnrlang'),
+            'territory_name': scrapeHidden('territory_name'), 'ring': scrapeValue("Ring"), 'brasip': scrapeValue("BRAS IP"),
+            'switchip': scrapeValue("Switch IP"), 'dropping': scrapeValue("Dropping"), 'interface': scrapeValue("Interface"),
+            'port_number': scrapeValue("Port Number"), 'pop_name': scrapeValue("Pop Name"), 'pop_pincode': scrapeValue("Pop Pin Code"),
+            'ngcomany': scrapeHidden('ngcomany'), 'brmobile': scrapeValue("Bank Registered Mobile No"), 'bremail': scrapeValue("Bank Registered Email ID"),
+            'reject_remark': "", 'onlinesub': "0", 'taxpayertype': 0, 'loc_type': null, 'onrechargeatom': 0, 'bankcheck': '1', 'subonrechargerazorpay': 0
+        };
+        const match = foundMatch;
+
+        await chat.sendMessage(`Found ANP: *${match.name}*\n\nInput New Mobile No.:`);
+        const phoneMessage = await waitForReply(message);
+        const newPhoneNumber = phoneMessage.body.trim();
+        if (!/^\d{10}$/.test(newPhoneNumber)) {
+            await chat.sendMessage("Invalid phone number. Operation canceled.");
+            return;
+        }
+
+        await chat.sendMessage(`Input New Email ID:`);
+        const emailMessage = await waitForReply(message);
+        const newEmail = emailMessage.body.trim().toLowerCase();
+        if (!/\S+@\S+\.\S+/.test(newEmail)) {
+            await chat.sendMessage("Invalid email format. Operation canceled.");
+            return;
+        }
+
+        await chat.sendMessage(`Everything correct? (yes/no)`);
+        const bankReply = await waitForReply(message);
+        const updateBankDetails = bankReply.body.trim().toLowerCase() === 'yes';
+
+        const finalPayload = { ...payloadData, cnumber: newPhoneNumber, cemail: newEmail };
+        if (updateBankDetails) {
+            finalPayload.brmobile = newPhoneNumber;
+            finalPayload.bremail = newEmail;
+        }
+
+        let confirmationMessage = `*Confirm Details*\n_Changes are highlighted in bold._\n\n*Partner ID:* ${finalPayload.partnerid}\n*Company Name:* ${finalPayload.cname}\n*Phone:* *${finalPayload.cnumber}*\n*Email Address:* *${finalPayload.cemail}*\n*Bank Mobile:* ${updateBankDetails ? `*${finalPayload.brmobile}*` : finalPayload.brmobile}\n*Bank Email:* ${updateBankDetails ? `*${finalPayload.bremail}*` : finalPayload.bremail}\n\nCorrect? Type *yes* to submit, or anything else to cancel.`;
+        await chat.sendMessage(confirmationMessage);
+        const finalConfirmation = await waitForReply(message);
+
+        if (finalConfirmation.body.trim().toLowerCase() === 'yes') {
+            const freshCookiesForUpdate = sessionCache;
+            const updateUrl = `${baseURL}/billcntl/savepdetailbefore`;
+            const response = await axios.post(updateUrl, new URLSearchParams(finalPayload), {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': `${freshCookiesForUpdate.railwireCookie.name}=${freshCookiesForUpdate.railwireCookie.value}; ${freshCookiesForUpdate.ciSessionCookie.name}=${freshCookiesForUpdate.ciSessionCookie.value}`
+                }
+            });
+            const updateResponse = response.data;
+
+            if (updateResponse && (updateResponse.STATUS === "OK" || updateResponse.STATUS === "BANK VERIFIED")) {
+                await chat.sendMessage(`ANP details updated successfully for *${match.name}*!`);
+            } else {
+                const errorMsg = updateResponse ? (updateResponse.MESSAGE || updateResponse.STATUS) : "Unknown error";
+                await chat.sendMessage(`Update failed for *${match.name}*. Server response: ${errorMsg}`);
+            }
+        } else {
+            await chat.sendMessage("Update canceled by user. No changes were made.");
+        }
+    } catch (error) {
+        console.error("Error during ANP update after retries:", error.message);
+        await chat.sendMessage("An unexpected error occurred during the ANP update process.");
+    }
+};
+
+// New function to handle OTT complaints automatically
+const processOTTComplaint = async (message, userIdentifier, serviceProvider) => {
+    const {
+        userCode
+    } = userSessions.get(userIdentifier);
+    const chat = await message.getChat();
+
+    // Load OTT data
+    const ottData = userDataCacheByFile['AllData'];
+    const userData = ottData.get(userCode);
+
+    if (!userData) {
+        userSessions.delete(userIdentifier);
+        return;
+    }
+
+    try {
+        // Login to get UserId
+        const loginResult = await login();
+
+        const payload = {
+            Mode: 1,
+            ComplaintNo: 0,
+            ContactName: userData.ContactName,
+            CustMobileNo: userData.MobileNo,
+            Username: userData.Username,
+            CompanyName: "RailTel Corporation India Ltd.",
+            VendorCode: "RTCIL",
+            OperatorCode: "JHRT",
+            Email: userData.Email,
+            Phone: userData.MobileNo,
+            Subject: `${serviceProvider} not working`,
+            Description: `Customer is not able to use ${serviceProvider}`,
+            Remark: "",
+            Status: "O",
+            TicketOwner: "Angad",
+            ServiceProvider: serviceProvider,
+            IssueType: "Subscription",
+            ReportedDate: new Date().toISOString().slice(0, 16),
+            Priority: "High",
+            Channel: "Phone",
+            Classifications: "Problem",
+            UserId: loginResult.UserId
+        };
+
+        // Submit complaint
+        const response = await axios.post(
+            'http://apiv1.inteligo.tech/api/OTT/GOTTComplaintRegistration',
+            payload
+        );
+
+        const result = response.data;
+
+        // Fetch updated complaint list to get latest complaint
+        const complaintsResponse = await axios.post(
+            `http://apiv1.inteligo.tech/api/OTT/GGetOTTComplaintList?UserID=${loginResult.UserId}`,
+            loginResult.UserId
+        );
+
+        const complaints = complaintsResponse.data;
+        const latestComplaint = complaints.length > 0 ? complaints[0] : null;
+
+        // Build reply
+        const apiMessage = result.ErrorMsg || "Unknown response from server.";
+        let reply = `*${apiMessage}*\n\n`;
+        reply += `*Username:* ${userData.Username}\n`;
+
+        if (latestComplaint) {
+            reply += `*Complaint No.:* ${latestComplaint.ComplaintNumber}\n`;
+            reply += `*Status:* ${latestComplaint.Status}\n`;
+        }
+
+        reply += "\n*OTT Team se call aayega customer ko inform kar den aap*.";
+
+        await chat.sendMessage(reply);
+
+    } catch (error) {
+        await chat.sendMessage(`❌ Error submitting complaint for ${userCode}.\n\nError: ${error.message}`);
+    }
+
+    userSessions.delete(userIdentifier);
+};
+
+// Subjects list (already present in your file, keep it as global)
+const subjects = [
+    "Activate with available balance", "AGNP bank details updation", "ANP - Mobile number and Email ID change",
+    "ANP address change", "ANP Demo ID renewal", "ANP disbursement issue", "ANP GSTIN issue",
+    "ANP name change", "ANP online recharge issue", "ANP-AGNP mapping", "Authentication issue",
+    "BSS issue", "CRM ticket issue", "CSV download option issue", "Data usage issue", "Decommission date updation",
+    "disable sub-online recharge", "DOC updation", "Double recharge", "DVR IP Port Request",
+    "Enable sub-online recharge", "IFSC code issue", "Invoice issue", "Location transfer",
+    "Others", "Package change", "Permanent Inactive Request", "Plan Implementation", "Plan Upgradation",
+    "SLA dashboard issue", "Stale session", "Static IP DoP updation", "Static IP recharge issue",
+    "Static IP renewal issue", "Sub - Mobile number and Email ID Change", "Subscriber address change",
+    "Subscriber applicant name change", "Subscriber GSTIN change", "Subscriber GSTIN issue",
+    "Subscriber GSTIN Removal", "Subscriber KYC-Application Mapping", "Subscriber KYC/Application issue",
+    "Subscriber online recharge issue", "Subscriber package issue", "Subscriber static IP issue",
+    "Subscription expiry", "Subscription type change", "User Reactivation", "Username change",
+    "Wrong recharge"
+];
+
+
+// Main SLA Ticket Creation Function
+const createSLATicket = async (message) => {
+    const chat = await message.getChat();
+
+    try {
+        // Step 1: Login
+        const loginResponse = await axios.post(
+            'https://sla.railwire.co.in/rlogin/index ',
+            new URLSearchParams({
+                username: 'MSP-JH',
+                password: 'Wired&Wireless',
+            }), {
+                maxRedirects: 0,
+                validateStatus: status => status === 303,
+            }
+        );
+
+        const setCookieHeader = loginResponse.headers['set-cookie'];
+        if (!setCookieHeader || setCookieHeader.length === 0) {
+            throw new Error('Login failed: No session cookie received');
+        }
+
+        const ciSessionCookie = setCookieHeader
+            .find(cookie => cookie.startsWith('ci_session='))
+            .split(';')[0];
+
+        // Step 2: Show subject list
+        let subjectListMsg = "Subject:\n";
+        subjects.forEach((subj, i) => {
+            subjectListMsg += `${i + 1}. ${subj}\n`;
+        });
+        await chat.sendMessage(subjectListMsg);
+
+        // Step 3: Wait for subject selection
+        const subjectMessage = await waitForReply(message);
+        const subjectIndex = parseInt(subjectMessage.body.trim());
+        const selectedSubject = subjects[subjectIndex - 1];
+
+        if (!selectedSubject) {
+            await chat.sendMessage("❌ Invalid subject selection.");
+            return;
+        }
+
+        // Step 4: Ask for description (single message input)
+        await chat.sendMessage("Enter description:");
+        const descMessage = await waitForReply(message);
+        const desc = descMessage.body.trim(); // Accepts multiline input
+
+        // Step 5: Confirm sending without preview
+        await chat.sendMessage("Do you want to send the request? Type *yes* or *no*.");
+
+        const confirmMessage = await waitForReply(message);
+        if (confirmMessage.body.trim().toLowerCase() !== 'yes') {
+            await chat.sendMessage("Request canceled.");
+            return;
+        }
+
+        // Step 6: Submit form
+        const form = new FormData();
+        form.append('desc', desc);
+        form.append('subject', selectedSubject);
+        form.append('project', 'Retail');
+        form.append('scode', 'JH');
+        form.append('mspid', '11');
+        form.append('circle', 'JH');
+        form.append('assig_date', 'undefined');
+
+        await axios.post(
+            'https://sla.railwire.co.in/mspcntl/addmspincident ',
+            form, {
+                headers: {
+                    ...form.getHeaders(),
+                    Cookie: ciSessionCookie,
+                }
+            }
+        );
+
+        // Step 7: Fetch latest incident
+        const qs = require('qs');
+        const ajaxPayload = qs.stringify({
+            draw: 1,
+            start: 0,
+            length: 1,
+            incident_status: 'Pending',
+            descp: '',
+            s_date: '',
+            'search[value]': '',
+            'search[regex]': false,
+            ...Array.from({
+                length: 7
+            }).reduce((acc, _, i) => ({
+                ...acc,
+                [`columns[${i}][data]`]: ['ticketid', 'msp_created', 'etr', 'status', 'ptype', 'actualclosedate', 'description'][i],
+                [`columns[${i}][searchable]`]: true,
+                [`columns[${i}][orderable]`]: false,
+                [`columns[${i}][search][value]`]: '',
+                [`columns[${i}][search][regex]`]: false
+            }), {})
+        });
+
+        const ajaxResponse = await axios.post(
+            'https://sla.railwire.co.in/mspcntl/msp_incident_details_ajax ',
+            ajaxPayload, {
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Accept': 'application/json, text/javascript, */*; q=0.01',
+                    'Cookie': ciSessionCookie
+                }
+            }
+        );
+
+        const incidents = ajaxResponse.data?.data;
+        if (incidents && incidents.length > 0) {
+            const ticketId = incidents[0].ticketid;
+            await chat.sendMessage(`✅ Incident created successfully! Ticket ID: #${ticketId}`);
+        } else {
+            await chat.sendMessage("⚠️ Incident submitted but no ticket ID found.");
+        }
+
+    } catch (error) {
+        console.error('Error creating SLA ticket:', error.message);
+        await chat.sendMessage("❌ Failed to create SLA ticket.");
+    }
+};
+
+const handleTicketActivation = async (message) => {
+    const chat = await message.getChat();
+    await chat.sendMessage("*++* Working *++*");
+    try {
+        const cookies = sessionCache;
+        const client = axios.create({
+            baseURL: 'https://jh.railwire.co.in',
+            headers: {
+                'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            withCredentials: true,
+        });
+        const pageOffsets = ['', '30', '60'];
+        const tickets = [];
+        for (const offset of pageOffsets) {
+            const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
+            const response = await client.get(url);
+            const $ = cheerio.load(response.data);
+            $('table#results tbody tr').each((i, row) => {
+                const cells = $(row).find('td');
+                const respondLink = $(cells[cells.length - 1]).find('a').attr('href');
+                const statusText = $(cells[7]).text().trim().toLowerCase();
+                const subjectText = $(cells[4]).text().trim();
+                const match = respondLink?.match(/\/billticketview\/(\d+)\//);
+                if (match) {
+                    tickets.push({ ticketId: match[1], viewUrl: respondLink, status: statusText, subject: subjectText.toLowerCase() });
+                }
+            });
+        }
+        
+        let closedCount = 0, skippedCount = 0;
+        const closedTickets = [];
+        if (tickets.length > 0) {
+            let closed = 0, skipped = 0;
+            const processed = [];
+            const autoCloseSubjects = ['no connectivity', 'wireless network issue'];
+
+            for (const ticket of tickets) {
+                if (!['open', 'progress'].includes(ticket.status)) {
+                    skipped++; continue;
+                }
+                const detailRes = await client.get(ticket.viewUrl);
+                const $$ = cheerio.load(detailRes.data);
+                let subscriberId = null;
+                $$('table.table-bordered.table-striped.table-condensed tbody tr').each((i, row) => {
+                    if ($$(row).find('td:first-child').text().trim().toLowerCase() === 'subscriber') {
+                        subscriberId = $$(row).find('td:nth-child(2)').text().trim();
+                    }
+                });
+                const shouldCheckSession = autoCloseSubjects.some(subject => ticket.subject.includes(subject));
+                if (shouldCheckSession && subscriberId) {
+                    const sessionStatus = await checkSessionStatus(subscriberId);
+                    if (sessionStatus === 'Active') {
+                        const closePayload = new URLSearchParams({ ticketid: ticket.ticketId, response: 'Dear customer, link has been restored.', railwire_test_name: cookies.railwireCookie.value });
+                        const closeResponse = await client.post('/crmcntl/close_ticket', closePayload.toString());
+                        if (closeResponse.status === 200) {
+                            closed++;
+                            processed.push({ ticketId: ticket.ticketId, subscriberId: subscriberId });
+                        } else { skipped++; }
+                    } else { skipped++; }
+                } else { skipped++; }
+            }
+            closedCount = closed;
+            skippedCount = skipped;
+            closedTickets.push(...processed);
+        }
+
+        let ticketSummary = `🎯 *Ticket Processing Results*\n\n*📊 Summary:*\n\n✅ ${closedCount} Closed (Session Active)\n⏭️ ${skippedCount} Skipped (Various Reasons)\n\n`;
+        if (closedTickets.length > 0) {
+            ticketSummary += `*🔒 Closed (${closedTickets.length}):*\n`;
+            for (const ticket of closedTickets) {
+                ticketSummary += `#${ticket.ticketId} (${ticket.subscriberId})\n`;
+            }
+            ticketSummary += `\n`;
+        }
+        await chat.sendMessage(ticketSummary);
+    } catch (error) {
+        console.error('Error in handleTicketActivation after retries:', error);
+        await chat.sendMessage(`Error processing tickets: ${error.message}`);
+    }
+};
+
+// Helper function to check session status
+async function checkSessionStatus(subscriberCode) {
+    try {
+        const cookies = sessionCache;
+        const client = axios.create({
+            baseURL: 'https://jh.railwire.co.in',
+            headers: {
+                'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            withCredentials: true,
+        });
+        const payload = new URLSearchParams({ railwire_test_name: cookies.railwireCookie.value, 'user-search': subscriberCode });
+        const searchRes = await client.post('/billcntl/searchsub', payload.toString());
+        const $ = cheerio.load(searchRes.data);
+        const detailLink = $('a[href^="/billcntl/subscriptiondetail/"]').attr('href');
+        if (!detailLink) throw new Error('Subscriber detail link not found');
+
+        const detailPageRes = await client.get(detailLink);
+        const $$ = cheerio.load(detailPageRes.data);
+        const dataUsageLink = $$('a[href^="/billcntl/currentmonthdatause/"]').attr('href');
+        if (!dataUsageLink) throw new Error('Data usage link not found');
+
+        const usagePageRes = await client.get(dataUsageLink);
+        const $$$ = cheerio.load(usagePageRes.data);
+        const sessionActive = $$$('#cusdiscon_btn').length > 0;
+        return sessionActive ? 'Active' : 'Not Active';
+    } catch (err) {
+        console.warn(`Session status check failed for ${subscriberCode} after retries:`, err.message);
+        return 'Not Active';
+    }
+}
+
+// Simplified Active Filter - REBUILT WITH LOGIC FROM MainForm.cs
 const filterActiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
-        await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
-        const fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
-        await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
-        const toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        await chat.sendMessage("Enter FROM date (YYYY-MM-DD):");
+        const fromDate = (await waitForReply(message)).body.trim();
+        await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
+        const toDate = (await waitForReply(message)).body.trim();
+        
+        await chat.sendMessage("Downloading active report and processing...");
+        
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
+        // Set date range for active report
         await axios.post('https://jh.railwire.co.in/ajx_datatables/sub_activesearch', 
             new URLSearchParams({
                 'partnerid': 'All',
@@ -1560,16 +1999,17 @@ const filterActiveSubscribers = async (message) => {
                 'Username': row.username || '',
                 'Status': row.status || '',
                 'Registration Date': row.registrationdate || '',
-                'Expiry': row.expiry || '',
                 'Partner Name': partnerName,
+                'Expiry': row.expiry || '',
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
-                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
                 'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
                 'Mobile Number': row.mobileno || '',
                 'Package Name': packageName,
-                'Balance': row.balance || ''
+                'Balance': row.balance || '',
+                'Conversation Remark': '',
+                'Final Remark': ''
             };
             // --- END OF ENRICHMENT LOGIC ---
 
@@ -1606,15 +2046,17 @@ const filterActiveSubscribers = async (message) => {
     }
 };
 
-// -- Filters the Inactive Subscriber CSV report based on package and registration date criteria and sends the resulting CSV --
-
+// Inactive Filter - REBUILT WITH LOGIC FROM MainForm.cs
 const filterInactiveSubscribers = async (message) => {
     const chat = await message.getChat();
     try {
-        await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
-        const fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
-        await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
-        const toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        await chat.sendMessage("Enter FROM date (YYYY-MM-DD):");
+        const fromDate = (await waitForReply(message)).body.trim();
+        await chat.sendMessage("Enter TO date (YYYY-MM-DD):");
+        const toDate = (await waitForReply(message)).body.trim();
+        
+        await chat.sendMessage("Downloading inactive report and processing...");
+        
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
@@ -1644,7 +2086,7 @@ const filterInactiveSubscribers = async (message) => {
         
         const currentYear = new Date().getFullYear();
         const currentMonth = new Date().getMonth();
-        const currentDate = new Date().toLocaleDateString('en-GB').replace(/\//g, '-');
+        const currentDate = new Date().toLocaleDateString('en-GB').replace(/\//g, '-'); // Formats as DD-MM-YYYY
         for (let i = 1; i < lines.length; i++) {
             const values = parseCSVLine(lines[i]);
             if (values.length < headers.length) continue;
@@ -1658,6 +2100,7 @@ const filterInactiveSubscribers = async (message) => {
             const partnerName = row.partnercompanyname || '';
             const regDate = row.registrationdate ? new Date(row.registrationdate) : null;
 
+            // --- FILTERING LOGIC FROM C# APP ---
             if (packageName.trim().toLowerCase() === PackageNameToFilterOut.toLowerCase()) {
                 removedForPackage++;
                 continue;
@@ -1670,7 +2113,9 @@ const filterInactiveSubscribers = async (message) => {
                 removedForCurrentMonth++;
                 continue;
             }
+            // --- END OF FILTERING LOGIC ---
 
+            // --- DATA ENRICHMENT (VLOOKUP) LOGIC FROM C# APP ---
             const partnerDetails = partnerNameLookupCache.get(normalize(partnerName));
 
             const cleanRow = {
@@ -1678,15 +2123,17 @@ const filterInactiveSubscribers = async (message) => {
                 'Username': row.username || '',
                 'Status': row.status || '',
                 'Registration Date': row.registrationdate || '',
-                'Expiry': row.expiry || '',
                 'Partner Name': partnerName,
                 'Mobile Number': row.mobileno || '',
+                'Expiry': row.expiry || '',
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
-                'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',
                 'Marketing Team': partnerDetails ? partnerDetails['Marketing Team'] : '',
-                'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : ''
+                'Marketing Team No.': partnerDetails ? partnerDetails['Marketing Team No.'] : '',
+                'Conversation Remark': '',
+                'Final Remark': ''
             };
+            // --- END OF ENRICHMENT LOGIC ---
 
             filteredData.push(cleanRow);
         }
@@ -1721,65 +2168,476 @@ const filterInactiveSubscribers = async (message) => {
     }
 };
 
-/* ----------------------------------------------------------------
-Section 6: ANP Monitoring (NMS) Features
-------------------------------------------------------------------- */
+// --- AFTER (FIXED) ---
+const createActiveCSV = (data) => {
+    const headers = [
+        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
+        'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number', 'Package Name',
+        'Balance', 'Conversation Remark', 'Final Remark'
+    ];
+    
+    let csv = headers.join(',') + '\n';
+    data.forEach(row => {
+        const values = headers.map(header => {
+            // Convert value to string BEFORE using .includes()
+            const stringValue = (row[header] || '').toString(); 
+            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
+        });
+        csv += values.join(',') + '\n';
+    });
+    
+    return csv;
+};
 
-// -- Sends an ANP alert message, optionally filtering for Aman's specific districts --
+// --- AFTER (FIXED) ---
+const createInactiveCSV = (data) => {
+    const headers = [
+        'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
+        'Date', 'District', 'Marketing Team', 'Marketing Team No.', 'Mobile Number',
+        'Conversation Remark', 'Final Remark'
+    ];
+    
+    let csv = headers.join(',') + '\n';
+    data.forEach(row => {
+        const values = headers.map(header => {
+            // Convert value to string BEFORE using .includes()
+            const stringValue = (row[header] || '').toString();
+            return stringValue.includes(',') ? `"${stringValue}"` : stringValue;
+        });
+        csv += values.join(',') + '\n';
+    });
+    
+    return csv;
+};
 
-const sendAnpAlert = async (message, partnerDetails = null) => {
-    if (!partnerDetails) {
+async function ChangePlan(formData) {
+    try {
+        const cookies = sessionCache;
+        const url = 'https://jh.railwire.co.in/finapis/msp_plan_applynow';
+        const payload = {
+            verifyHidden: formData.verifyHidden,
+            subid: formData.subid,
+            pkgid: formData.pkgid,
+            status: formData.status,
+            uname: formData.username,
+            oldpkgid: formData.oldpkgid,
+            railwire_test_name: cookies.railwireCookie.value
+        };
+        const response = await axios.post(url, new URLSearchParams(payload).toString(), {
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
+            }
+        });
+        const responseData = response.data;
+        console.log(`Plan changed : "${responseData.STATUS}"`);
+        return responseData.STATUS === 'OK';
+    } catch (error) {
+        console.error('\n❌ Error changing plan after retries:', error.message);
+        return false;
+    }
+}
+
+const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsActivateID, wantsDeactivateID) => {
+    const session = userSessions.get(userIdentifier);
+    if (!session || !session.userCodes || !session.userCodes.length === 0) {
+        userSessions.delete(userIdentifier);
         return;
     }
-    const district = partnerDetails['District'];
-    if (district && ANP_CONFIG.AMAN_DISTRICTS.has(district)) {
+
+    const { userCodes } = session;
+    const userDataMap = userDataCacheByFile['AllData'];
+
+    for (const userCode of userCodes) {
         try {
-            await client.sendMessage(ANP_CONFIG.AMAN_TARGET_ID, message);
+            let fetchedUserData = userDataMap.get(userCode) || await fetchUserDataFromPortal(userCode);
+            if (fetchedUserData) {
+                let passwordResetResult = null;
+                const maskedName = maskName(toTitleCase(fetchedUserData.Name));
+                const maskedId = maskUsername(userCode);
+                let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
+
+                if (wantsSessionReset) {
+                    console.log(`Requested Session Cleaning for ${userCode}...`);
+                    const sessionStatus = await resetSession(fetchedUserData);
+                    if (sessionStatus === 'SUCCESS') responseMessage += '\n*Session clear kr diya gya h* ✅';
+                    else if (sessionStatus === 'NOT_ACTIVE') responseMessage += '\nSession active nhi hai ❌';
+                    else responseMessage += '\nFailed to reset session ❌';
+                }
+                if (wantsActivateID) {
+                console.log(`Activating ID for ${userCode}...`);
+                const result = await DeactivateID(fetchedUserData);
+                responseMessage += '\n' + (result ? '*Subscriber activated* ✅' : 'Failed to activate ❌');
+                }
+
+                if (wantsDeactivateID) {
+                console.log(`Deactivating ID for ${userCode}...`);
+                const result = await DeactivateID(fetchedUserData);
+                responseMessage += '\n' + (result ? '*Subscriber deactivated* ✅' : 'Failed to deactivate ❌');
+                }
+                if (wantsPasswordReset) {
+                    console.log(`Requested Password Resetting for ${userCode}...`);
+                    passwordResetResult = await resetPassword(fetchedUserData);
+                    if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) responseMessage += '\n*Reset kr diya gya hai* ✅';
+                    else responseMessage += '\nPassword reset failed';
+                }
+                await message.reply(responseMessage);
+            } else {
+                await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
+            }
         } catch (error) {
-            console.error(`Failed to send ANP alert to Aman: ${error.message}`);
+            console.error(`CRITICAL ERROR processing ${userCode}:`, error.message);
+            await message.reply(`Could not process *${userCode}*. The server is not responding. Please try again later.`);
         }
+    }
+    userSessions.delete(userIdentifier);
+};
+
+const processTasks = async (cookies, originalMessage) => {
+    try {
+        const { data } = await axios.get(mainURL, { 
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 5000 
+        });
+        const $ = cheerio.load(data);
+        const submittedTasks = [];
+        const verifiedTasks = [];
+
+        $('table tbody tr').each((_, el) => {
+            const cells = $(el).find('td');
+            const status = $(cells[1]).text().trim().toLowerCase();
+            const link = $(cells[2]).find('a').attr('href');
+            const oltabid = link?.split('/')[3];
+            if (status === 'submitted' && link) submittedTasks.push({ link, oltabid });
+            else if (status === 'verified' && link) verifiedTasks.push({ link });
+        });
+
+        const results = {
+            submitted: { total: submittedTasks.length, processed: 0 },
+            verified: { total: verifiedTasks.length, processed: 0 }
+        };
+
+        for (const { link, oltabid } of submittedTasks) {
+            if (await handleSubmittedForm(link, oltabid, cookies, null, originalMessage)) results.submitted.processed++;
+        }
+        for (const { link } of verifiedTasks) {
+            if (await handleVerifiedForm(link, cookies, originalMessage)) results.verified.processed++;
+        }
+
+        return results;
+    } catch (err) { 
+        console.error(`Error processing tasks: ${err.message}`); 
+        return null;
     }
 };
 
-// -- Fetches a list of all partners and their total subscriber counts from the billing portal --
+const processAllForms = async (cookies, originalMessage) => {
+    let totalProcessed = 0;
+    let isComplete = false;
 
-const getAllPartners = async (authData) => {
-    const billingCookieString = `${authData.railwireCookie.name}=${authData.railwireCookie.value}; ${authData.ciSessionCookie.name}=${authData.ciSessionCookie.value}`;
-    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl/billpartners`, { headers: { 'Cookie': billingCookieString } }));
+    while (!isComplete) {
+        const results = await processTasks(cookies, originalMessage);
+        if (results) {
+            totalProcessed += results.submitted.processed + results.verified.processed;
+            console.log(`Processed ${results.submitted.processed} Submitted and ${results.verified.processed} Verified Forms.`);
 
-    const $ = cheerio.load(data);
-    const partners = [];
-    $('table#dynamic-table tbody tr').each((i, elem) => {
-        const tds = $(elem).find('td');
-        const anpStatus = $(tds[9]).text().trim();
-        if (anpStatus.toLowerCase() === 'active') {
-            const partnerId = $(tds[0]).text().trim();
-            const partnerName = $(tds[1]).find('a').text().trim();
-            const totalSubs = parseInt($(tds[8]).text().trim(), 10);
-            if (partnerId && partnerName && !isNaN(totalSubs)) {
-                partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
+            if (results.submitted.processed === 0 && results.verified.processed === 0) {
+                isComplete = true;
+            }
+        } else {
+            console.log('Failed to process KYC tasks. Retrying...');
+        }
+
+        if (!isComplete) {
+            console.log('Fetching Remaining Application Forms..');
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 5 seconds before refreshing
+        }
+    }
+
+    return totalProcessed;
+};
+
+const getHiddenInputs = async (link, cookies) => {
+    try {
+        const { data } = await axios.get(`${baseURL}${link}`, { 
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 9000 
+        });
+        const $ = cheerio.load(data);
+        const extract = (name) => $(`input[name=${name}]`).val()?.toLowerCase();
+        return {
+            firstname: extract('firstname'),
+            oltabid: extract('oltabid'),
+            pggroupid: extract('pggroupid'),
+            pkgid: extract('pkgid'),
+            anp: extract('anp'),
+            vlanid: $('select#vlanid option:selected').val()?.toLowerCase(),
+            caf_type: extract('caf_type'),
+            mobileno: extract('mobileno')
+        };
+    } catch (err) { console.error(`Error extracting inputs from ${link}: ${err.message}`); return {}; }
+};
+
+const getUsername = async (firstName, baseUsername, cookies) => {
+    const tryDerive = async (modUsername) => {
+        try {
+            const payload = new URLSearchParams({
+                fname: firstName,
+                lname: '',
+                mod_username: modUsername,
+                railwire_test_name: cookies.railwireCookie.value
+            }).toString();
+            const { data } = await axios.post(`${baseURL}/kycapis/derive_username`, payload, { 
+                headers: { 
+                    Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                timeout: 9000 
+            });
+            return data;
+        } catch { return { STATUS: 'ERROR' }; }
+    };
+
+    let attempt = 0;
+    let response;
+    do {
+        response = await tryDerive(baseUsername + (attempt || ''));
+        attempt++;
+    } while (response.STATUS !== 'OK' && attempt < 10);
+
+    return response.UNAME || null;
+};
+
+const createSubscription = async (link, derivedUsername, cookies, originalMessage) => {
+    try {
+        const hiddenInputs = await getHiddenInputs(link, cookies);
+        if (!hiddenInputs.oltabid || !hiddenInputs.pggroupid || !hiddenInputs.pkgid) {
+            throw new Error('Required hidden inputs not found');
+        }
+
+        // Extract the existing username from the form
+        const { data: formData } = await axios.get(`${baseURL}${link}`, { 
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 9000 
+        });
+        const $ = cheerio.load(formData);
+        const existingUsername = ($('input#uname').attr('value') || $('input#dusername_org').attr('value') || '').trim();
+
+        // Present options to user
+        let optionsMessage = `Choose username option:\n`;
+        if (existingUsername) {
+            optionsMessage += `1. Default Username: ${existingUsername}\n`;
+        }
+        optionsMessage += `2. Bot Username: ${derivedUsername}\n`;
+        optionsMessage += `3. Input Username manually\n`;
+        
+        await originalMessage.reply(optionsMessage);
+        
+        const userChoice = await waitForReply(originalMessage);
+        let finalUsername;
+
+        switch(userChoice.body.trim()) {
+            case '1':
+                if (existingUsername) {
+                    const verifiedExisting = await getUsername(hiddenInputs.firstname, existingUsername, cookies);
+                    if (verifiedExisting) {
+                        finalUsername = existingUsername;
+                    } else {
+                        return false;
+                    }
+                }
+                break;
+            case '2':
+                finalUsername = derivedUsername;
+                break;
+            case '3':
+                await originalMessage.reply("Input Manual Username:");
+                const manualUsernameMessage = await waitForReply(originalMessage);
+                const manualUsername = manualUsernameMessage.body.trim();
+                const verifiedManual = await getUsername(hiddenInputs.firstname, manualUsername, cookies);
+                if (verifiedManual) {
+                    finalUsername = manualUsername;
+                } else {
+                    return false;
+                }
+                break;
+            default:
+                await originalMessage.reply("Invalid option.");
+                return false;
+        }
+
+        if (!finalUsername) return false;
+
+        const payload = new URLSearchParams({
+            oltabid: hiddenInputs.oltabid,
+            uname: finalUsername,
+            pggroupid: hiddenInputs.pggroupid,
+            pkgid: hiddenInputs.pkgid,
+            anp: hiddenInputs.anp,
+            vlanid: hiddenInputs.vlanid,
+            caf_type: hiddenInputs.caf_type,
+            railwire_test_name: cookies.railwireCookie.value,
+            mobileno: hiddenInputs.mobileno
+        }).toString();
+
+        const { status, data: subscriptionResponse } = await axios.post(`${baseURL}/kycapis/create_subscription`, payload, { 
+            headers: { 
+                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            timeout: 9000 
+        });
+        
+        if (subscriptionResponse.STATUS === undefined) {
+            throw new Error('Cookie expired during subscription creation');
+        }
+        
+        console.log(status === 200 ? 'Subscription created.' : 'Subscription failed.', subscriptionResponse);
+        
+        if (status === 200) {
+            const userData = await fetchUserDataFromPortal(finalUsername);
+            if (userData) {
+                const resetResponse = await resetPassword(userData, cookies);
+                console.log('Password reset response:', resetResponse);
+            } else {
+                console.error('Failed to fetch user data for password reset.');
             }
         }
-    });
-    if (partners.length === 0) throw new Error("ANP Checker: Could not find any active partners.");
-    return partners;
-};
-
-// -- Fetches the current live online subscriber count for a specific partner ID from the NMS --
-
-const getLiveOnlineCount = async (partnerId, nmsCookie) => {
-    try {
-        const { data } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`, new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': nmsCookie, 'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php` }, timeout: 15000 }));
-
-        const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
-        return match ? parseInt(match[1], 10) : null;
-    } catch (error) {
-        console.error(`ANP Checker: Failed to get live count for ${partnerId} after multiple retries: ${error.message}`);
-        return 'Error';
+        return status === 200;
+    } catch (err) {
+        console.error(`Error creating subscription: ${err.message}`);
+        return false;
     }
 };
 
-// -- The main cron job that checks all ANP links, detects down/up events, and sends alerts --
+const handleVerifiedForm = async (link, cookies, originalMessage) => {
+    try {
+        const { data } = await axios.get(`${baseURL}${link}`, { 
+            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+            timeout: 9000 
+        });
+        const $ = cheerio.load(data);
+        const firstName = (await getHiddenInputs(link, cookies)).firstname?.split(' ')[0]?.toLowerCase();
+        if (!firstName) throw new Error('First name not found.');
+
+        const associatedPartner = $(`.profile-info-name:contains('Associated Partner')`).next().text().trim().toLowerCase();
+        const jhCode = jhCodeMap?.get(associatedPartner);
+        if (!jhCode) throw new Error('JH Code not found for partner.');
+
+        const baseUsername = `${jhCode}.${firstName}`;
+        const finalUsername = await getUsername(firstName, baseUsername, cookies);
+        if (!finalUsername) throw new Error('Failed to derive username.');
+
+        return await createSubscription(link, finalUsername, cookies, originalMessage);
+    } catch (err) { 
+        console.error(`Error processing verified form: ${err.message}`); 
+        return false;
+    }
+};
+
+const handleSubmittedForm = async (link, oltabid, cookies, username, originalMessage) => {
+    try {
+      const { data } = await axios.get(`${baseURL}${link}`, { 
+        headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
+        timeout: 8000
+      });
+      const $ = cheerio.load(data);
+  
+      // Extracting Address Proof
+      const addressProofElement = $(`.profile-info-name:contains('Address Proof Copy')`).next().find('span');
+      const addressProof = addressProofElement.length > 0 && addressProofElement.text().trim().toLowerCase() === 'file not exists' ? 'file not exists' : 'View';
+      const mobileNo = $(`.profile-info-name:contains('Mobile No.')`).next().find('span').text().trim();
+  
+      if (addressProof === 'file not exists') {
+        console.log('Marking as verified because file not exists.');
+        const payload = new URLSearchParams({ 
+          oltabid, 
+          mobileno_dual: mobileNo, 
+          railwire_test_name: cookies.railwireCookie.value 
+        }).toString();
+        await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, { 
+          headers: { 
+            Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          timeout: 5000 
+        });
+        return true;
+      } else {
+        console.log(`Address proof exists for mobile ${mobileNo}.`);
+
+        let extractedData = `Address Proof for No.: ${mobileNo}\n\nDetails:\n`;
+    
+        $('.profile-info-row').each((index, element) => {
+          const infoName = $(element).find('.profile-info-name').text().trim();
+          const infoValueElement = $(element).find('.profile-info-value span');
+  
+          let infoValue = infoValueElement.text().trim();
+  
+          // Handle links specifically
+          const linkElement = infoValueElement.find('a');
+          if (linkElement.length > 0) {
+            const link = linkElement.attr('href');
+            infoValue = `View >> ${baseURL}${link}`;
+          }
+  
+          if (
+            !infoName.toLowerCase().includes('notice') &&
+            !infoName.toLowerCase().includes('reason for kyc rejection') &&
+            !infoName.toLowerCase().includes('address type') &&
+            !infoName.toLowerCase().includes('id no') &&
+            !infoName.toLowerCase().includes('door no') &&
+            !infoName.toLowerCase().includes('street') &&
+            !infoName.toLowerCase().includes('applied package')
+          ) {
+            extractedData += `${infoName}: ${infoValue}\n`;
+          }
+        });
+  
+        // Send the extracted data to the user
+        await originalMessage.reply(extractedData);
+        await originalMessage.reply(`Do you want to verify? (y/n)`);
+  
+        const userInputMessage = await waitForReply(originalMessage);
+        const userInput = userInputMessage.body.toLowerCase();
+  
+        if (userInput.startsWith('y')) {
+          const payload = new URLSearchParams({ 
+            oltabid, 
+            mobileno_dual: mobileNo, 
+            railwire_test_name: cookies.railwireCookie.value 
+          }).toString();
+          await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, { 
+            headers: { 
+              Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
+              'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            timeout: 5000 
+          });
+          return true;
+        } else {
+          console.log('User choose not to verify. Skipping verification.');
+          return false;
+        }
+      }
+    } catch (err) { 
+      console.error(`Error processing submitted form for ${username}: ${err.message}`); 
+      return false;
+    }
+  };
+
+
+
+const processInBatches = async (items, asyncFn, batchSize = 15) => {
+    let results = [];
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batchItems = items.slice(i, i + batchSize);
+        const batchPromises = batchItems.map(item => asyncFn(item));
+        const batchResults = await Promise.all(batchPromises);
+        results = results.concat(batchResults);
+    }
+    return results;
+};
 
 const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
     const startTime = new Date();
@@ -1902,1231 +2760,42 @@ const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
     }
 };
 
-// -- Checks for changes in ANP active subscriber counts and notifies --
-const checkAnpCountsAndNotify = async (manualTriggerChatId = null) => {
-    try {
-        const cookies = sessionCache;
-        if (!cookies) throw new Error("Session not available for ANP count check.");
+const getAllPartners = async (authData) => {
+    const billingCookieString = `${authData.railwireCookie.name}=${authData.railwireCookie.value}; ${authData.ciSessionCookie.name}=${authData.ciSessionCookie.value}`;
+    const { data } = await retryOperation(() => axios.get(`${baseURL}/billcntl/all_sms_foranp/1/-2FBCY7HQ5jGnbqMTZmz1NxqNq9xb9oTXb-1tLVyjeg=`, { headers: { 'Cookie': billingCookieString, 'Referer': `${baseURL}/billcntl/all_sms_templates` } }));
 
-        const billingCookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-        const { data } = await axios.get(`${baseURL}/billcntl/billpartners`, { headers: { 'Cookie': billingCookieString } });
-
-        const currentCounts = {};
-        const $ = cheerio.load(data);
-        $('table#dynamic-table tbody tr').each((i, elem) => {
-            const tds = $(elem).find('td');
-            const partnerName = $(tds[1]).find('a').text().trim();
-            const activeSubs = parseInt($(tds[8]).text().trim(), 10);
-            if (partnerName && !isNaN(activeSubs)) {
-                currentCounts[partnerName] = activeSubs;
-            }
-        });
-
-        const previousCounts = loadAnpCountsState();
-
-        if (Object.keys(previousCounts).length === 0) {
-            saveAnpCountsState(currentCounts);
-            if (manualTriggerChatId) await client.sendMessage(manualTriggerChatId, "Subsequent checks will report changes.");
-            return;
-        }
-
-        const increased = [];
-        const decreased = [];
-        const allPartners = new Set([...Object.keys(currentCounts), ...Object.keys(previousCounts)]);
-
-        allPartners.forEach(partnerName => {
-            const currentCount = currentCounts[partnerName] || 0;
-            const previousCount = previousCounts[partnerName] || 0;
-            const diff = currentCount - previousCount;
-
-            if (diff > 0) {
-                increased.push(`${partnerName}: ${previousCount} -> ${currentCount} (+${diff})`);
-            } else if (diff < 0) {
-                decreased.push(`${partnerName}: ${previousCount} -> ${currentCount} (${diff})`);
-            }
-        });
-
-        const reportDate = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-
-        if (increased.length === 0 && decreased.length === 0) {
-            if (manualTriggerChatId) {
-                let noChangeMessage = `*ANP Subscriber Count Report*\n` +
-                                      `*Date:* ${reportDate}\n\n` +
-                                      `*All Stable!* No changes detected since the last check.` +
-                                      `\n\nTo check anytime type: *anpcount*`;
-                await client.sendMessage(manualTriggerChatId, noChangeMessage);
-            }
-        } else {
-            let reportMessage = `*ANP Subscriber Count Report*\n` +
-                                `*Date:* ${reportDate}\n\n` +
-                                `*Summary:*\n` +
-                                `${increased.length} partner(s) increased.\n` +
-                                `${decreased.length} partner(s) decreased.`;
-
-            if (increased.length > 0) {
-                reportMessage += `\n\n*Increased Subscribers:*\n${increased.join('\n')}`;
-            }
-            if (decreased.length > 0) {
-                reportMessage += `\n\n*Decreased Subscribers:*\n${decreased.join('\n')}`;
-            }
-            
-            const targetId = manualTriggerChatId || ANP_CONFIG.AMAN_TARGET_ID;
-            if (manualTriggerChatId) {
-                reportMessage += `\n\nTo check anytime type: *anpcount*`;
-            }
-            await client.sendMessage(targetId, reportMessage);
-        }
-
-        saveAnpCountsState(currentCounts);
-
-    } catch (error) {
-        console.error('Error during ANP count check:', error.message);
-        if (manualTriggerChatId) {
-            await client.sendMessage(manualTriggerChatId, `Error checking ANP counts: ${error.message}`);
-        }
-    }
-};
-
-/* ----------------------------------------------------------------
-Section 7: CRM & Ticket Monitoring Features
-------------------------------------------------------------------- */
-
-// -- Sends a message to the configured ticket monitoring target ID --
-
-const sendTicketAlert = async (message) => {
-    try {
-        const chat = await client.getChatById(TICKET_MONITOR_CONFIG.TARGET_ID);
-        await chat.sendMessage(message);
-    } catch (error) {
-    }
-};
-
-// -- Formats ticket details into a clean, readable message string --
-
-const formatTicketMessage = (details) => {
-    const timeOpenedParts = details.timeOpened.split(' on ');
-    let openedDate = details.timeOpened;
-    if (timeOpenedParts.length > 1) {
-        openedDate = timeOpenedParts[1].split(' ').slice(1).join(' ');
-    }
-
-    let message = `*Ticket #${details.ticketId}:*\n\n` +
-        `*Subscriber:* ${details.subscriberUsername}\n` +
-        `*Customer No.:* ${details.customerMobile}\n` +
-        `*Status:* ${details.status}\n` +
-        `*Time opened:* ${openedDate}\n` +
-        `*Subject:* ${details.subject}\n` +
-        `*District:* ${details.district}\n` +
-        `*Cluster:* ${details.cluster}\n` +
-        `*Partner:* ${details.partnerName}\n`;
-
-    if (details.messages.length > 0) {
-        message += `\n`;
-        
-        const messageLines = details.messages.map(msg => {
-            const timePart = (msg.timestamp.split(' on ')[0] || msg.timestamp).toLowerCase();
-            const singleLineContent = msg.content.replace(/\r?\n|\r/g, ' ');
-            return `*${timePart}* | *${msg.author}:* ${singleLineContent}`;
-        });
-        
-        message += messageLines.join('\n\n'); 
-    }
-
-    return message.trim();
-};
-
-// -- Fetches all details (messages, status, user data) for a specific ticket URL from the CRM portal --
-
-const getTicketDetails = async (ticketUrl, cookies) => {
-    const { data } = await axios.get(`https://jh.railwire.co.in${ticketUrl}`, {
-        headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
-    });
     const $ = cheerio.load(data);
-
-    const details = {};
-    let subscriberUsername = '';
-
-    $('table.table-bordered.table-striped.table-condensed').first().find('tbody tr').each((i, row) => {
-        const key = $(row).find('td:first-child').text().trim().toLowerCase();
-        const value = $(row).find('td:nth-child(2)').text().trim();
-        
-        if (key === 'ticket id') details.ticketId = value;
-        if (key === 'subscriber') subscriberUsername = value;
-        if (key === 'status') details.status = value;
-        if (key === 'time opened') details.timeOpened = value;
+    const partners = [];
+    $('table tbody tr').each((i, elem) => {
+        const tds = $(elem).find('td');
+        if (tds.length < 4) return;
+        const partnerId = $(tds[0]).find('input').val();
+        const partnerName = $(tds[2]).text().trim();
+        const totalSubs = parseInt($(tds[3]).text().trim(), 10);
+        if (partnerId && partnerName && !isNaN(totalSubs)) partners.push({ id: partnerId, name: partnerName, total_subs: totalSubs });
     });
-
-    if (!subscriberUsername) return null;
-    details.subscriberUsername = subscriberUsername;
-
-    const subjectContainer = $('.well.well-lg:contains("Subject :")');
-    subjectContainer.find('span[style="float:right;"]').remove();
-    details.subject = subjectContainer.text().replace('Subject :', '').trim();
-    const cachedSubData = subscriberDataCache.get(normalize(subscriberUsername));
-    let portalUserData = null;
-
-    if (!cachedSubData || !cachedSubData['MobileNo']) {
-        portalUserData = await fetchUserDataFromPortal(subscriberUsername);
-    }
-
-    details.customerMobile = portalUserData?.MobileNo || cachedSubData?.['MobileNo'] || 'N/A';
-    details.district = cachedSubData?.['District'] || 'N/A';
-    details.cluster = cachedSubData?.['Cluster'] || 'N/A';
-    details.partnerName = cachedSubData?.['ANP Name'] || 'N/A';
-
-    details.messages = [];
-    $('h5.blue').each((i, authorElement) => {
-        const author = $(authorElement).text().trim();
-        const messageContainer = $(authorElement).parent('.col-xs-2').siblings('.col-xs-10');
-        
-        if (messageContainer.length > 0) {
-            const timestamp = messageContainer.find('h6.header').text().trim();
-            const content = messageContainer.find('.well').text().trim();
-
-            if (author && timestamp && content) {
-                details.messages.push({ author, timestamp, content });
-            }
-        }
-    });
-
-    return details;
+    if (partners.length === 0) throw new Error("ANP Checker: Could not find any partners.");
+    return partners;
 };
 
-// -- Periodically checks the CRM for new or updated 'Open'/'Progress' tickets for specific subjects and alerts on changes --
-
-const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
+const getLiveOnlineCount = async (partnerId, nmsCookie) => {
     try {
-        console.log(`Ticket monitoring started - Triggered by: ${triggeredBy}`);
-        
-        const cookies = sessionCache;
-        const apiClient = axios.create({
-            baseURL: 'https://jh.railwire.co.in',
-            headers: { 'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}` }
-        });
+        const { data } = await retryOperation(() => axios.post(`${ANP_CONFIG.SERVICES_URL}/dash.php`, new URLSearchParams({ 'search1': 'search', 'ptnr': partnerId }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': nmsCookie, 'Referer': `${ANP_CONFIG.SERVICES_URL}/dash.php` }, timeout: 15000 }));
 
-        const pageOffsets = ['', '30', '60', '90'];
-        const ticketsToCheck = [];
-
-        for (const offset of pageOffsets) {
-            const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
-            const response = await apiClient.get(url);
-            const $ = cheerio.load(response.data);
-
-            $('table#results tbody tr').each((i, row) => {
-                const cells = $(row).find('td');
-                const status = $(cells[7]).text().trim().toLowerCase();
-                const subject = $(cells[4]).text().trim().toLowerCase();
-
-                if (!ALLOWED_TICKET_SUBJECTS.has(subject)) {
-                    return; // Skip non-allowed subjects
-                }
-                
-                // We now check ALL 'open' or 'progress' tickets, not just new ones
-                if (status === 'open' || status === 'progress') {
-                    const ticketId = $(cells[0]).contents().first().text().trim();
-                    const viewLink = $(cells[cells.length - 1]).find('a').attr('href');
-                    if (ticketId && viewLink) {
-                        ticketsToCheck.push({ ticketId, viewLink });
-                    }
-                }
-            });
-        }
-
-        if (ticketsToCheck.length === 0) {
-            console.log(`No "Open" or "Progress" tickets found for allowed subjects (${triggeredBy})`);
-            return;
-        }
-
-        let changesFound = false;
-        for (const ticket of ticketsToCheck) {
-            const ticketDetails = await getTicketDetails(ticket.viewLink, cookies);
-            
-            if (ticketDetails) {
-                // Handle missing cluster data
-                if (!ticketDetails.cluster) {
-                    console.log(`Skipping ticket #${ticket.ticketId} - No cluster data available`);
-                    continue;
-                }
-                
-                // Case-insensitive cluster check
-                if (ticketDetails.cluster.toLowerCase() !== 'tatanagar') {
-                    console.log(`[TicketMonitor] Skipping ticket #${ticket.ticketId} - Cluster "${ticketDetails.cluster}" is not Tatanagar.`);
-                    console.log(`Skipping ticket #${ticket.ticketId} - Cluster: ${ticketDetails.cluster}`);
-                    continue;
-                }
-                
-                const currentMessageCount = ticketDetails.messages.length;
-                const lastKnownState = processedTicketsState[ticket.ticketId];
-
-                // SCENARIO 1: Brand new ticket
-                if (!lastKnownState) {
-                    console.log(`New ticket found: #${ticket.ticketId} (${triggeredBy})`);
-                    changesFound = true;
-                    const formattedMessage = formatTicketMessage(ticketDetails);
-                    await sendTicketAlert(formattedMessage);
-                    processedTicketsState[ticket.ticketId] = { messageCount: currentMessageCount };
-                    saveProcessedTicketsState(); // Save state immediately
-                } 
-                // SCENARIO 2: Existing ticket has a new reply
-                else if (lastKnownState.messageCount < currentMessageCount) {
-                    console.log(`Update found for ticket #${ticket.ticketId} (New message) - ${triggeredBy}`);
-                    changesFound = true;
-                    const formattedMessage = formatTicketMessage(ticketDetails);
-                    await sendTicketAlert(formattedMessage);
-                    processedTicketsState[ticket.ticketId].messageCount = currentMessageCount;
-                    saveProcessedTicketsState(); // Save updated state
-                }
-            }
-        }
-
-        if (!changesFound) {
-            console.log(`Checked ${ticketsToCheck.length} active tickets. No new messages or tickets found (${triggeredBy})`);
-        }
+        const match = data.match(/Online Users.*?<div class="value">(\d+)<\/div>/s);
+        return match ? parseInt(match[1], 10) : null;
     } catch (error) {
-        console.error(`Error during ticket monitoring (${triggeredBy}):`, error.message);
-    }
-};
-
-// -- Sends a reply back to a specific ticket ID via the Railwire CRM portal --
-
-const replyToTicket = async (ticketId, content) => {
-    try {
-        const cookies = sessionCache;
-        if (!cookies) throw new Error('No active session.');
-
-        const form = new FormData();
-        form.append('railwire_test_name', cookies.railwireCookie.value);
-        form.append('ticketid', ticketId);
-        form.append('content', content);
-
-        console.log(`[replyToTicket] Replying to #${ticketId} with content: "${content}"`);
-        const response = await axios.post('https://jh.railwire.co.in/crmcntl/bill_tickreply', form, {
-            headers: {
-                ...form.getHeaders(),
-                'Cookie': `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`
-            }
-        });
-
-        return response.status === 200;
-    } catch (error) {
-        console.error(`Error replying to ticket #${ticketId}:`, error.message);
-        return false;
-    }
-};
-
-// -- Handles the interactive command to reply to a specific ticket --
-
-const handleTicketReply = async (message, ticketId, replyContent) => {
-    const chat = await message.getChat();
-    const success = await replyToTicket(ticketId, replyContent);
-
-    if (success) {
-        const ticketViewUrl = `/crmcntl/billticketview/${ticketId}/0`;
-        const updatedDetails = await getTicketDetails(ticketViewUrl, sessionCache);
-        if (updatedDetails) {
-            await chat.sendMessage(`✅ Reply sent!:\n\n${formatTicketMessage(updatedDetails)}`);
-        } else {
-            await chat.sendMessage(`✅ Reply sent, but couldn't fetch the update.`);
-        }
-    } else {
-        await chat.sendMessage(`❌ Failed to send reply to ticket #${ticketId}.`);
-    }
-};
-
-// -- Checks if a subscriber's session is currently active/connected on the BNG --
-
-async function checkSessionStatus(subscriberCode) {
-    try {
-        const cookies = sessionCache;
-        const client = axios.create({
-            baseURL: 'https://jh.railwire.co.in',
-            headers: {
-                'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            withCredentials: true,
-        });
-        const payload = new URLSearchParams({ railwire_test_name: cookies.railwireCookie.value, 'user-search': subscriberCode });
-        const searchRes = await client.post('/billcntl/searchsub', payload.toString());
-        const $ = cheerio.load(searchRes.data);
-        const detailLink = $('a[href^="/billcntl/subscriptiondetail/"]').attr('href');
-        if (!detailLink) throw new Error('Subscriber detail link not found');
-
-        const detailPageRes = await client.get(detailLink);
-        const $$ = cheerio.load(detailPageRes.data);
-        const dataUsageLink = $$('a[href^="/billcntl/currentmonthdatause/"]').attr('href');
-        if (!dataUsageLink) throw new Error('Data usage link not found');
-
-        const usagePageRes = await client.get(dataUsageLink);
-        const $$$ = cheerio.load(usagePageRes.data);
-        const sessionActive = $$$('#cusdiscon_btn').length > 0;
-        return sessionActive ? 'Active' : 'Not Active';
-    } catch (err) {
-        console.warn(`Session status check failed for ${subscriberCode} after retries:`, err.message);
-        return 'Not Active';
-    }
-}
-
-
-// -- Handles the command to automatically check 'No Connectivity' and 'Wireless Issue' tickets and close them if the session is active --
-
-const handleTicketActivation = async (message) => {
-    const chat = await message.getChat();
-    await chat.sendMessage("*++* Get ready to fight! *++*");
-    try {
-        const cookies = sessionCache;
-        const client = axios.create({
-            baseURL: 'https://jh.railwire.co.in',
-            headers: {
-                'Cookie': `ci_session=${cookies.ciSessionCookie.value}; ${cookies.railwireCookie.name}=${cookies.railwireCookie.value}`,
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            withCredentials: true,
-        });
-        const pageOffsets = ['', '30', '60'];
-        const tickets = [];
-        for (const offset of pageOffsets) {
-            const url = `/crmcntl/bill_tickets${offset ? '/' + offset : ''}`;
-            const response = await client.get(url);
-            const $ = cheerio.load(response.data);
-            $('table#results tbody tr').each((i, row) => {
-                const cells = $(row).find('td');
-                const respondLink = $(cells[cells.length - 1]).find('a').attr('href');
-                const statusText = $(cells[7]).text().trim().toLowerCase();
-                const subjectText = $(cells[4]).text().trim();
-                const match = respondLink?.match(/\/billticketview\/(\d+)\//);
-                if (match) {
-                    tickets.push({ ticketId: match[1], viewUrl: respondLink, status: statusText, subject: subjectText.toLowerCase() });
-                }
-            });
-        }
-        
-        let closedCount = 0, skippedCount = 0;
-        const closedTickets = [];
-        if (tickets.length > 0) {
-            let closed = 0, skipped = 0;
-            const processed = [];
-            const autoCloseSubjects = ['no connectivity', 'wireless network issue'];
-
-            for (const ticket of tickets) {
-                if (!['open', 'progress'].includes(ticket.status)) {
-                    skipped++; continue;
-                }
-                const detailRes = await client.get(ticket.viewUrl);
-                const $$ = cheerio.load(detailRes.data);
-                let subscriberId = null;
-                $$('table.table-bordered.table-striped.table-condensed tbody tr').each((i, row) => {
-                    if ($$(row).find('td:first-child').text().trim().toLowerCase() === 'subscriber') {
-                        subscriberId = $$(row).find('td:nth-child(2)').text().trim();
-                    }
-                });
-                const shouldCheckSession = autoCloseSubjects.some(subject => ticket.subject.includes(subject));
-                if (shouldCheckSession && subscriberId) {
-                    const sessionStatus = await checkSessionStatus(subscriberId);
-                    console.log(`[TicketActivation] Checked session for ticket #${ticket.ticketId} (${subscriberId}): Status is ${sessionStatus}.`);
-                    if (sessionStatus === 'Active') {
-                        const closePayload = new URLSearchParams({ ticketid: ticket.ticketId, response: 'Dear customer, link has been restored.', railwire_test_name: cookies.railwireCookie.value });
-                        console.log(`[handleTicketActivation] Closing ticket #${ticket.ticketId} for subscriber ${subscriberId}`);
-                        const closeResponse = await client.post('/crmcntl/close_ticket', closePayload.toString());
-                        if (closeResponse.status === 200) {
-                            closed++;
-                            processed.push({ ticketId: ticket.ticketId, subscriberId: subscriberId });
-                        } else { skipped++; }
-                    } else { skipped++; }
-                } else { skipped++; }
-            }
-            closedCount = closed;
-            skippedCount = skipped;
-            closedTickets.push(...processed);
-        }
-
-        let ticketSummary = `🎯 *Ticket Processing Results*\n\n*📊 Summary:*\n\n✅ ${closedCount} Closed (Session Active)\n⏭️ ${skippedCount} Skipped (Various Reasons)\n\n`;
-        if (closedTickets.length > 0) {
-            ticketSummary += `*🔒 Closed (${closedTickets.length}):*\n`;
-            for (const ticket of closedTickets) {
-                ticketSummary += `#${ticket.ticketId} (${ticket.subscriberId})\n`;
-            }
-            ticketSummary += `\n`;
-        }
-        await chat.sendMessage(ticketSummary);
-    } catch (error) {
-        console.error('Error in handleTicketActivation after retries:', error);
-        await chat.sendMessage(`Error processing tickets: ${error.message}`);
-    }
-};
-
-// -- Uses Tesseract OCR to extract usernames/IDs from uploaded images --
-
-const extractUsernamesFromImage = async (message) => {
-    if (!message.hasMedia) return [];
-    const media = await message.downloadMedia();
-    if (!media || !media.mimetype.startsWith('image/')) return [];
-
-    try {
-        const imageBuffer = Buffer.from(media.data, 'base64');
-
-        const processedImageBuffer = await sharp(imageBuffer)
-            .greyscale()
-            .normalize()
-            .sharpen()
-            .toBuffer();
-
-        const { data: { text } } = await Tesseract.recognize( processedImageBuffer, 'eng' );
-        console.log(`[OCR] Raw extracted text: "${text.replace(/\n/g, ' ')}"`);
-
-        const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
-        let matches = text.match(subscriberIdPattern) || [];
-
-        if (matches.length > 0) {
-            console.log(`Found Subscriber ID(s): ${matches.join(', ')}`);
-            return [...new Set(matches)];
-        }
-
-        const usernamePattern = /(?<!\/)\b(jh(\.[\w-]+)+)\b/gi;
-        matches = text.match(usernamePattern) || [];
-
-        if (matches.length > 0) {
-            console.log(`Found Username(s): ${matches.join(', ')}`);
-        }
-
-        return [...new Set(matches.map(m => m.toLowerCase()))];
-
-    } catch (error) {
-        return [];
+        console.error(`ANP Checker: Failed to get live count for ${partnerId} after multiple retries: ${error.message}`);
+        return 'Error';
     }
 };
 
 
-/* ----------------------------------------------------------------
-Section 8: SLA Portal Features
-------------------------------------------------------------------- */
-
-// -- Handles the interactive workflow for creating a new SLA ticket on the Railwire SLA portal --
-
-const createSLATicket = async (message) => {
-    const chat = await message.getChat();
-
-    try {
-        // Step 1: Login
-        const loginResponse = await axios.post(
-            'https://sla.railwire.co.in/rlogin/index ',
-            new URLSearchParams({
-                username: 'MSP-JH',
-                password: 'Wired&Wireless',
-            }), {
-                maxRedirects: 0,
-                validateStatus: status => status === 303,
-            }
-        );
-
-        const setCookieHeader = loginResponse.headers['set-cookie'];
-        if (!setCookieHeader || setCookieHeader.length === 0) {
-            throw new Error('Login failed: No session cookie received');
-        }
-
-        const ciSessionCookie = setCookieHeader
-            .find(cookie => cookie.startsWith('ci_session='))
-            .split(';')[0];
-
-        // Step 2: Show subject list
-        let subjectListMsg = "Subject:\n";
-        subjects.forEach((subj, i) => {
-            subjectListMsg += `${i + 1}. ${subj}\n`;
-        });
-        await chat.sendMessage(subjectListMsg);
-
-        // Step 3: Wait for subject selection
-        const subjectMessage = await waitForReply(message);
-        const subjectIndex = parseInt(subjectMessage.body.trim());
-        const selectedSubject = subjects[subjectIndex - 1];
-
-        if (!selectedSubject) {
-            await chat.sendMessage("❌ Invalid subject selection.");
-            return;
-        }
-
-        // Step 4: Ask for description (single message input)
-        await chat.sendMessage("Enter description:");
-        const descMessage = await waitForReply(message);
-        const desc = descMessage.body.trim(); // Accepts multiline input
-
-        // Step 5: Confirm sending without preview
-        await chat.sendMessage("Do you want to send the request? Type *yes* or *no*.");
-
-        const confirmMessage = await waitForReply(message);
-        if (confirmMessage.body.trim().toLowerCase() !== 'yes') {
-            await chat.sendMessage("Request canceled.");
-            return;
-        }
-
-        // Step 6: Submit form
-        const form = new FormData();
-        form.append('desc', desc);
-        form.append('subject', selectedSubject);
-        form.append('project', 'Retail');
-        form.append('scode', 'JH');
-        form.append('mspid', '11');
-        form.append('circle', 'JH');
-        form.append('assig_date', 'undefined');
-
-        console.log('[createSLATicket] Sending SLA payload:', { desc, subject });
-
-        await axios.post(
-            'https://sla.railwire.co.in/mspcntl/addmspincident ',
-            form, {
-                headers: {
-                    ...form.getHeaders(),
-                    Cookie: ciSessionCookie,
-                }
-            }
-        );
-
-        // Step 7: Fetch latest incident
-        const qs = require('qs');
-        const ajaxPayload = qs.stringify({
-            draw: 1,
-            start: 0,
-            length: 1,
-            incident_status: 'Pending',
-            descp: '',
-            s_date: '',
-            'search[value]': '',
-            'search[regex]': false,
-            ...Array.from({
-                length: 7
-            }).reduce((acc, _, i) => ({
-                ...acc,
-                [`columns[${i}][data]`]: ['ticketid', 'msp_created', 'etr', 'status', 'ptype', 'actualclosedate', 'description'][i],
-                [`columns[${i}][searchable]`]: true,
-                [`columns[${i}][orderable]`]: false,
-                [`columns[${i}][search][value]`]: '',
-                [`columns[${i}][search][regex]`]: false
-            }), {})
-        });
-
-        const ajaxResponse = await axios.post(
-            'https://sla.railwire.co.in/mspcntl/msp_incident_details_ajax ',
-            ajaxPayload, {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'Accept': 'application/json, text/javascript, */*; q=0.01',
-                    'Cookie': ciSessionCookie
-                }
-            }
-        );
-
-        const incidents = ajaxResponse.data?.data;
-        if (incidents && incidents.length > 0) {
-            const ticketId = incidents[0].ticketid;
-            await chat.sendMessage(`✅ Incident created successfully! Ticket ID: #${ticketId}`);
-        } else {
-            await chat.sendMessage("⚠️ Incident submitted but no ticket ID found.");
-        }
-
-    } catch (error) {
-        console.error('Error creating SLA ticket:', error.message);
-        await chat.sendMessage("❌ Failed to create SLA ticket.");
-    }
-};
-
-/* ----------------------------------------------------------------
-Section 9: KYC & CAF Update Features
-------------------------------------------------------------------- */
-
-// -- Scans the KYC pending page and calls handlers for submitted and verified forms --
-
-const processTasks = async (cookies, originalMessage) => {
-    try {
-        const { data } = await axios.get(mainURL, { 
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-            timeout: 5000 
-        });
-        const $ = cheerio.load(data);
-        const submittedTasks = [];
-        const verifiedTasks = [];
-
-        $('table tbody tr').each((_, el) => {
-            const cells = $(el).find('td');
-            const status = $(cells[1]).text().trim().toLowerCase();
-            const link = $(cells[2]).find('a').attr('href');
-            const oltabid = link?.split('/')[3];
-            if (status === 'submitted' && link) submittedTasks.push({ link, oltabid });
-            else if (status === 'verified' && link) verifiedTasks.push({ link });
-        });
-
-        const results = {
-            submitted: { total: submittedTasks.length, processed: 0 },
-            verified: { total: verifiedTasks.length, processed: 0 }
-        };
-
-        for (const { link, oltabid } of submittedTasks) {
-            if (await handleSubmittedForm(link, oltabid, cookies, null, originalMessage)) results.submitted.processed++;
-        }
-        for (const { link } of verifiedTasks) {
-            if (await handleVerifiedForm(link, cookies, originalMessage)) results.verified.processed++;
-        }
-
-        return results;
-    } catch (err) { 
-        console.error(`Error processing tasks: ${err.message}`); 
-        return null;
-    }
-};
-
-// -- Loops through and processes all pending KYC forms until none are left --
-
-const processAllForms = async (cookies, originalMessage) => {
-    let totalProcessed = 0;
-    let isComplete = false;
-
-    while (!isComplete) {
-        const results = await processTasks(cookies, originalMessage);
-        if (results) {
-            totalProcessed += results.submitted.processed + results.verified.processed;
-            console.log(`Processed ${results.submitted.processed} Submitted and ${results.verified.processed} Verified Forms.`);
-
-            if (results.submitted.processed === 0 && results.verified.processed === 0) {
-                isComplete = true;
-            }
-        } else {
-            console.log('Failed to process KYC tasks. Retrying...');
-        }
-
-        if (!isComplete) {
-            console.log('Fetching Remaining Application Forms..');
-            await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 5 seconds before refreshing
-        }
-    }
-
-    return totalProcessed;
-};
-
-// -- Fetches hidden input values needed for KYC verification/subscription creation from a form page --
-
-const getHiddenInputs = async (link, cookies) => {
-    try {
-        const { data } = await axios.get(`${baseURL}${link}`, { 
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-            timeout: 9000 
-        });
-        const $ = cheerio.load(data);
-        const extract = (name) => $(`input[name=${name}]`).val()?.toLowerCase();
-        return {
-            firstname: extract('firstname'),
-            oltabid: extract('oltabid'),
-            pggroupid: extract('pggroupid'),
-            pkgid: extract('pkgid'),
-            anp: extract('anp'),
-            vlanid: $('select#vlanid option:selected').val()?.toLowerCase(),
-            caf_type: extract('caf_type'),
-            mobileno: extract('mobileno')
-        };
-    } catch (err) { console.error(`Error extracting inputs from ${link}: ${err.message}`); return {}; }
-};
-
-// -- Derives and verifies a unique available username based on first name and JH code --
-
-const getUsername = async (firstName, baseUsername, cookies) => {
-    const tryDerive = async (modUsername) => {
-        try {
-            const payload = new URLSearchParams({
-                fname: firstName,
-                lname: '',
-                mod_username: modUsername,
-                railwire_test_name: cookies.railwireCookie.value
-            }).toString();
-            console.log(`[getUsername] Deriving username with fname: "${firstName}", mod_username: "${modUsername}"`);
-            const { data } = await axios.post(`${baseURL}/kycapis/derive_username`, payload, { 
-                headers: { 
-                    Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                timeout: 9000 
-            });
-            return data;
-        } catch { return { STATUS: 'ERROR' }; }
-    };
-
-    let attempt = 0;
-    let response;
-    do {
-        response = await tryDerive(baseUsername + (attempt || ''));
-        attempt++;
-    } while (response.STATUS !== 'OK' && attempt < 10);
-
-    return response.UNAME || null;
-};
-
-// -- Creates a final subscription account using a verified username and pending application details --
-
-const createSubscription = async (link, derivedUsername, cookies, originalMessage) => {
-    try {
-        const hiddenInputs = await getHiddenInputs(link, cookies);
-        if (!hiddenInputs.oltabid || !hiddenInputs.pggroupid || !hiddenInputs.pkgid) {
-            throw new Error('Required hidden inputs not found');
-        }
-
-        // Extract the existing username from the form
-        const { data: formData } = await axios.get(`${baseURL}${link}`, { 
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-            timeout: 9000 
-        });
-        const $ = cheerio.load(formData);
-        const existingUsername = ($('input#uname').attr('value') || $('input#dusername_org').attr('value') || '').trim();
-
-        // Present options to user
-        let optionsMessage = `Choose username option:\n`;
-        if (existingUsername) {
-            optionsMessage += `1. Default Username: ${existingUsername}\n`;
-        }
-        optionsMessage += `2. Bot Username: ${derivedUsername}\n`;
-        optionsMessage += `3. Input Username manually\n`;
-        
-        await originalMessage.reply(optionsMessage);
-        
-        const userChoice = await waitForReply(originalMessage);
-        let finalUsername;
-
-        switch(userChoice.body.trim()) {
-            case '1':
-                if (existingUsername) {
-                    const verifiedExisting = await getUsername(hiddenInputs.firstname, existingUsername, cookies);
-                    if (verifiedExisting) {
-                        finalUsername = existingUsername;
-                    } else {
-                        return false;
-                    }
-                }
-                break;
-            case '2':
-                finalUsername = derivedUsername;
-                break;
-            case '3':
-                await originalMessage.reply("Input Manual Username:");
-                const manualUsernameMessage = await waitForReply(originalMessage);
-                const manualUsername = manualUsernameMessage.body.trim();
-                const verifiedManual = await getUsername(hiddenInputs.firstname, manualUsername, cookies);
-                if (verifiedManual) {
-                    finalUsername = manualUsername;
-                } else {
-                    return false;
-                }
-                break;
-            default:
-                await originalMessage.reply("Invalid option.");
-                return false;
-        }
-
-        if (!finalUsername) return false;
-
-        const payload = new URLSearchParams({
-            oltabid: hiddenInputs.oltabid,
-            uname: finalUsername,
-            pggroupid: hiddenInputs.pggroupid,
-            pkgid: hiddenInputs.pkgid,
-            anp: hiddenInputs.anp,
-            vlanid: hiddenInputs.vlanid,
-            caf_type: hiddenInputs.caf_type,
-            railwire_test_name: cookies.railwireCookie.value,
-            mobileno: hiddenInputs.mobileno
-        }).toString();
-
-        console.log('[createSubscription] Sending subscription payload:', Object.fromEntries(new URLSearchParams(payload)));
-
-        const { status, data: subscriptionResponse } = await axios.post(`${baseURL}/kycapis/create_subscription`, payload, { 
-            headers: { 
-                Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-                'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            timeout: 9000 
-        });
-        
-        if (subscriptionResponse.STATUS === undefined) {
-            throw new Error('Cookie expired during subscription creation');
-        }
-        
-        console.log(status === 200 ? 'Subscription created.' : 'Subscription failed.', subscriptionResponse);
-        
-        if (status === 200) {
-            const userData = await fetchUserDataFromPortal(finalUsername);
-            if (userData) {
-                const resetResponse = await resetPassword(userData, cookies);
-                console.log('Password reset response:', resetResponse);
-            } else {
-                console.error('Failed to fetch user data for password reset.');
-            }
-        }
-        return status === 200;
-    } catch (err) {
-        console.error(`Error creating subscription: ${err.message}`);
-        return false;
-    }
-};
-
-// -- Processes a KYC form marked as 'Verified', derives a username, and attempts subscription creation --
-
-const handleVerifiedForm = async (link, cookies, originalMessage) => {
-    try {
-        const { data } = await axios.get(`${baseURL}${link}`, { 
-            headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-            timeout: 9000 
-        });
-        const $ = cheerio.load(data);
-        const firstName = (await getHiddenInputs(link, cookies)).firstname?.split(' ')[0]?.toLowerCase();
-        if (!firstName) throw new Error('First name not found.');
-
-        const associatedPartner = $(`.profile-info-name:contains('Associated Partner')`).next().text().trim().toLowerCase();
-        const jhCode = jhCodeMap?.get(associatedPartner);
-        if (!jhCode) throw new Error('JH Code not found for partner.');
-
-        const baseUsername = `${jhCode}.${firstName}`;
-        const finalUsername = await getUsername(firstName, baseUsername, cookies);
-        console.log(`[handleVerifiedForm] Derived Data: Name="${firstName}", Partner="${associatedPartner}", JHCode="${jhCode}", BaseUser="${baseUsername}", FinalUser="${finalUsername}"`);
-        if (!finalUsername) throw new Error('Failed to derive username.');
-
-        return await createSubscription(link, finalUsername, cookies, originalMessage);
-    } catch (err) { 
-        console.error(`Error processing verified form: ${err.message}`); 
-        return false;
-    }
-};
-
-// -- Processes a KYC form marked as 'Submitted', sends details to the user, and attempts verification if confirmed --
-
-const handleSubmittedForm = async (link, oltabid, cookies, username, originalMessage) => {
-    try {
-      const { data } = await axios.get(`${baseURL}${link}`, { 
-        headers: { Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}` },
-        timeout: 8000
-      });
-      const $ = cheerio.load(data);
-  
-      // Extracting Address Proof
-      const addressProofElement = $(`.profile-info-name:contains('Address Proof Copy')`).next().find('span');
-      const addressProof = addressProofElement.length > 0 && addressProofElement.text().trim().toLowerCase() === 'file not exists' ? 'file not exists' : 'View';
-      const mobileNo = $(`.profile-info-name:contains('Mobile No.')`).next().find('span').text().trim();
-  
-      if (addressProof === 'file not exists') {
-        console.log('Marking as verified because file not exists.');
-        const payload = new URLSearchParams({ 
-          oltabid, 
-          mobileno_dual: mobileNo, 
-          railwire_test_name: cookies.railwireCookie.value 
-        }).toString();
-        console.log(`[handleSubmittedForm] Marking KYC as verified for oltabid: ${oltabid}`);
-        await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, { 
-          headers: { 
-            Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-            'Content-Type': 'application/x-www-form-urlencoded'
-          },
-          timeout: 5000 
-        });
-        return true;
-      } else {
-        console.log(`Address proof exists for mobile ${mobileNo}.`);
-
-        let extractedData = `Address Proof for No.: ${mobileNo}\n\nDetails:\n`;
-    
-        $('.profile-info-row').each((index, element) => {
-          const infoName = $(element).find('.profile-info-name').text().trim();
-          const infoValueElement = $(element).find('.profile-info-value span');
-  
-          let infoValue = infoValueElement.text().trim();
-  
-          // Handle links specifically
-          const linkElement = infoValueElement.find('a');
-          if (linkElement.length > 0) {
-            const link = linkElement.attr('href');
-            infoValue = `View >> ${baseURL}${link}`;
-          }
-  
-          if (
-            !infoName.toLowerCase().includes('notice') &&
-            !infoName.toLowerCase().includes('reason for kyc rejection') &&
-            !infoName.toLowerCase().includes('address type') &&
-            !infoName.toLowerCase().includes('id no') &&
-            !infoName.toLowerCase().includes('door no') &&
-            !infoName.toLowerCase().includes('street') &&
-            !infoName.toLowerCase().includes('applied package')
-          ) {
-            extractedData += `${infoName}: ${infoValue}\n`;
-          }
-        });
-  
-        // Send the extracted data to the user
-        await originalMessage.reply(extractedData);
-        await originalMessage.reply(`Do you want to verify? (y/n)`);
-  
-        const userInputMessage = await waitForReply(originalMessage);
-        const userInput = userInputMessage.body.toLowerCase();
-        console.log(`[handleSubmittedForm] User input for verification of mobile ${mobileNo} was: "${userInput}"`);
-  
-        if (userInput.startsWith('y')) {
-          const payload = new URLSearchParams({ 
-            oltabid, 
-            mobileno_dual: mobileNo, 
-            railwire_test_name: cookies.railwireCookie.value 
-          }).toString();
-          await axios.post(`${baseURL}/kycapis/kyc_mark_verified`, payload, { 
-            headers: { 
-              Cookie: `railwire_cookie_name=${cookies.railwireCookie.value}; ci_session=${cookies.ciSessionCookie.value}`,
-              'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            timeout: 5000 
-          });
-          return true;
-        } else {
-          console.log('User choose not to verify. Skipping verification.');
-          return false;
-        }
-      }
-    } catch (err) { 
-      console.error(`Error processing submitted form for ${username}: ${err.message}`); 
-      return false;
-    }
-  };
-
-/* ----------------------------------------------------------------
-Section 10: OTT Complaint Features
-------------------------------------------------------------------- */
-
-// -- Performs authentication against the OTT complaint system backend --
-
-async function login() {
-    try {
-        const response = await axios.post('http://apiv1.inteligo.tech/api/OTT/GSignin', {
-            UserName: 'JH-MSP',
-            Platform: 'GPanel',
-            Password: 'WfGMAkmJtRundSrD7r/MQA==',
-            IPAddress: ''
-        });
-
-        return response.data; // Should contain UserId
-    } catch (error) {
-        console.error('Login failed:', error.message);
-        throw error;
-    }
-}
-
-// -- Handles the interactive command to check the status of an OTT complaint number --
-
-const checkComplaintStatus = async (message) => {
-    const chat = await message.getChat();
-
-    // Step 1: Ask for Complaint Number
-    await chat.sendMessage("🔢 Complaint No:");
-    const compNoMsg = await waitForReply(message);
-    const complaintNumber = parseInt(compNoMsg.body.trim());
-
-    if (isNaN(complaintNumber)) {
-        await chat.sendMessage("Invalid Complaint Number.");
-        return;
-    }
-
-    // Step 2: Login to get UserId
-    let loginResult;
-    try {
-        loginResult = await login();
-    } catch (err) {
-        await chat.sendMessage("Failed to authenticate with backend.");
-        return;
-    }
-
-    // Step 3: Fetch all complaints
-    try {
-        const complaintsResponse = await axios.post(
-            `http://apiv1.inteligo.tech/api/OTT/GGetOTTComplaintList?UserID=${loginResult.UserId}`,
-            loginResult.UserId
-        );
-
-        const complaints = complaintsResponse.data;
-
-        // Step 4: Find the complaint
-        const complaint = complaints.find(c => c.ComplaintNumber === complaintNumber);
-
-        if (!complaint) {
-            await chat.sendMessage(`No complaint found with number ${complaintNumber}`);
-            return;
-        }
-
-        // Step 5: Format and send response in your desired format
-        const statusMap = {
-            'Closed': '✅',
-            'OnHold': '⏸️',
-            'Open': '🔄'
-        };
-
-        const statusEmoji = statusMap[complaint.Status] || 'ℹ️';
-        const remark = complaint.Remark ? complaint.Remark : "No remarks provided.";
-
-        let reply = "*Complaint Status*\n\n";
-        reply += `*Complaint Number:* ${complaint.ComplaintNumber}\n`;
-        reply += `*Username:* ${complaint.Username}\n`;
-        reply += `*Status:* ${statusEmoji} ${complaint.Status}\n`;
-        reply += `*Service:* ${complaint.ServiceProvider}\n\n`;
-        reply += `*Remark:* ${remark}`;
-
-        await chat.sendMessage(reply);
-
-    } catch (error) {
-        await chat.sendMessage(`❌ Error fetching complaint.\n\nError: ${error.message}`);
-    }
-};
-
-// -- Submits an OTT complaint for a subscriber to the backend system --
-
-const processOTTComplaint = async (message, userIdentifier, serviceProvider) => {
-    const {
-        userCode
-    } = userSessions.get(userIdentifier);
-    const chat = await message.getChat();
-
-    // Load OTT data
-    const userData = subscriberDataCache.get(userCode);
-
-    if (!userData) {
-        userSessions.delete(userIdentifier);
-        return;
-    }
-
-    try {
-        // Login to get UserId
-        const loginResult = await login();
-
-        const payload = {
-        Mode: 1,
-        ComplaintNo: 0,
-        ContactName: userData['Name'] || userData.Name,
-        CustMobileNo: userData['MobileNo'] || userData.MobileNo,
-        Username: userData.Username,
-        CompanyName: "RailTel Corporation India Ltd.",
-        VendorCode: "RTCIL",
-        OperatorCode: "JHRT",
-        Email: userData['Email'] || userData.Email,
-        Phone: userData['MobileNo'] || userData.MobileNo,
-        Subject: `${serviceProvider} not working`,
-        Description: `Customer is not able to use ${serviceProvider}`,
-        Remark: "",
-        Status: "O",
-        TicketOwner: "Angad",
-        ServiceProvider: serviceProvider,
-        IssueType: "Subscription",
-        ReportedDate: new Date().toISOString().slice(0, 16),
-        Priority: "High",
-        Channel: "Phone",
-        Classifications: "Problem",
-        UserId: loginResult.UserId
-        };
-
-        console.log(`[processOTTComplaint] Sending payload for ${userData.Username}:`, payload);
-
-
-        // Submit complaint
-        const response = await axios.post(
-            'http://apiv1.inteligo.tech/api/OTT/GOTTComplaintRegistration',
-            payload
-        );
-
-        const result = response.data;
-
-        // Fetch updated complaint list to get latest complaint
-        const complaintsResponse = await axios.post(
-            `http://apiv1.inteligo.tech/api/OTT/GGetOTTComplaintList?UserID=${loginResult.UserId}`,
-            loginResult.UserId
-        );
-
-        const complaints = complaintsResponse.data;
-        const latestComplaint = complaints.length > 0 ? complaints[0] : null;
-
-        // Build reply
-        const apiMessage = result.ErrorMsg || "Unknown response from server.";
-        let reply = `*${apiMessage}*\n\n`;
-        reply += `*Username:* ${userData.Username}\n`;
-
-        if (latestComplaint) {
-            reply += `*Complaint No.:* ${latestComplaint.ComplaintNumber}\n`;
-            reply += `*Status:* ${latestComplaint.Status}\n`;
-        }
-
-        reply += "\n*OTT Team se call aayega customer ko inform kar den aap*.";
-
-        await chat.sendMessage(reply);
-
-    } catch (error) {
-        await chat.sendMessage(`❌ Error submitting complaint for ${userCode}.\n\nError: ${error.message}`);
-    }
-
-    userSessions.delete(userIdentifier);
-};
-
-/* ----------------------------------------------------------------
-Section 11: WhatsApp Message Handlers & Main Logic
-------------------------------------------------------------------- */
-
-// -- Executes the requested subscriber actions (session reset, password reset, activate/deactivate) for all collected user codes --
-
-const processActions = async (message, userIdentifier, wantsSessionReset, wantsPasswordReset, wantsActivateID, wantsDeactivateID) => {
-    const session = userSessions.get(userIdentifier);
-    if (!session || !session.userCodes || !session.userCodes.length === 0) {
-        userSessions.delete(userIdentifier);
-        return;
-    }
-
-    const { userCodes } = session;
-    console.log(`[processActions] Starting actions for ${userCodes.length} user(s): [${userCodes.join(', ')}]`);
-
-    for (const userCode of userCodes) {
-        try {
-            let fetchedUserData = subscriberDataCache.get(userCode) || await fetchUserDataFromPortal(userCode);
-            if (fetchedUserData) {
-                let passwordResetResult = null;
-                const maskedName = maskName(toTitleCase(fetchedUserData.Name));
-                const maskedId = maskUsername(userCode);
-                let responseMessage = `*Name:* ${maskedName}\n*ID:* ${maskedId}`;
-
-                if (wantsSessionReset) {
-                    console.log(`Requested Session Cleaning for ${userCode}...`);
-                    const sessionStatus = await resetSession(fetchedUserData);
-                    if (sessionStatus === 'SUCCESS') responseMessage += '\n*Session clear kr diya gya h* ✅';
-                    else if (sessionStatus === 'NOT_ACTIVE') responseMessage += '\nSession active nhi hai ❌';
-                    else responseMessage += '\nFailed to reset session ❌';
-                }
-                if (wantsActivateID) {
-                console.log(`Activating ID for ${userCode}...`);
-                const result = await DeactivateID(fetchedUserData);
-                responseMessage += '\n' + (result ? '*Subscriber activated* ✅' : 'Failed to activate ❌');
-                }
-
-                if (wantsDeactivateID) {
-                console.log(`Deactivating ID for ${userCode}...`);
-                const result = await DeactivateID(fetchedUserData);
-                responseMessage += '\n' + (result ? '*Subscriber deactivated* ✅' : 'Failed to deactivate ❌');
-                }
-                if (wantsPasswordReset) {
-                    console.log(`Requested Password Resetting for ${userCode}...`);
-                    passwordResetResult = await resetPassword(fetchedUserData);
-                    if (passwordResetResult.portalReset && passwordResetResult.pppoeReset) responseMessage += '\n*Reset kr diya gya hai* ✅';
-                    else responseMessage += '\nPassword reset failed';
-                }
-                await message.reply(responseMessage);
-            } else {
-                await message.reply(`Sahi ID btaye yeh galat h: ${userCode}`);
-            }
-        } catch (error) {
-            console.error(`CRITICAL ERROR processing ${userCode}:`, error.message);
-            await message.reply(`Could not process *${userCode}*. The server is not responding. Please try again later.`);
-        }
-    }
-    userSessions.delete(userIdentifier);
-};
-
-
-// -- The central handler that parses every incoming WhatsApp message, manages user sessions, and routes commands to feature functions --
 
 const handleIncomingMessage = async (message) => {
     try {
         const chat = await message.getChat();
-        const ignoredGroupNames = ['Railtel & MSP team Jharkhand', 'Railwire-Jharkhand-Tech'];
+        const ignoredGroupNames = ['Railtel & MSP team Jharkhand', 'Railwire - Dhanbad Zone'];
         if (chat.isGroup && ignoredGroupNames.includes(chat.name)) {
             return;
         }
@@ -3150,7 +2819,7 @@ const handleIncomingMessage = async (message) => {
         const SESSION_TIMEOUT_MS = 300000;
         const EXECUTION_DELAY_MS = 1300;
 
-        const codePattern = /(?<!\/)\b(jh(\.[\w-]+)+)\b/gi;
+        const codePattern = /jh(\s*\.\s*\w+){2,}/gi;
         const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
 
         const codesFromText = (rawBody.match(codePattern) || []).concat(rawBody.match(subscriberIdPattern) || []);
@@ -3245,26 +2914,19 @@ const handleIncomingMessage = async (message) => {
             }
             return;
         }
-
-        if (messageBodyNoSpaces.includes('anpcount')) {
-            const currentHour = new Date().getHours();
-            if (currentHour < 9) return await message.reply('This command is only active between 9:00 AM and 11:59 PM.');
-            await message.reply('Checking ANP subscriber counts...');
-            await checkAnpCountsAndNotify(chat.id._serialized);
-            return;
-        }
         
         if (messageBodyNoSpaces.includes('anpupdate')) {
             await handleAnpUpdate(message);
             return;
         }
 
-        if (messageBodyNoSpaces.includes('chalufilter')) {
+        // Add these to your handleIncomingMessage function:
+        if (messageBodyNoSpaces.includes('activefilter')) {
         await filterActiveSubscribers(message);
         return;
         }
 
-        if (messageBodyNoSpaces.includes('bandfilter')) {
+        if (messageBodyNoSpaces.includes('grabfilter')) {
         await filterInactiveSubscribers(message);
         return;
         }
@@ -3325,13 +2987,6 @@ const handleIncomingMessage = async (message) => {
     }
 };
 
-
-/* ----------------------------------------------------------------
-Section 12: Client Events & Initialization
-------------------------------------------------------------------- */
-
-// -- Handler for WhatsApp client initialization and cron setup --
-
 client.on('ready', async () => {
 
     // --- 1. Initial Data Loading ---
@@ -3345,12 +3000,9 @@ client.on('ready', async () => {
     // --- 2. Define Authentication Refresh Logic ---
     const AUTH_LIFETIME = 282000; // 4 minutes 42 seconds
 
-
-    // Function to force refresh portal and NMS sessions
-
     const forceRefreshSession = async () => {
         try {
-            const freshPortalSession = await authenticate('support', 'Wave&light1');
+            const freshPortalSession = await authenticate('admin', 'Pass@123');
             const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
             sessionCache = freshPortalSession;
             nmsSessionCache = freshNmsCookie;
@@ -3372,13 +3024,12 @@ client.on('ready', async () => {
         await new Promise(resolve => setTimeout(resolve, initialDelay));
         await forceRefreshSession();
         console.log('Bot is fully operational.');
-
-        // Function for the daily scheduled subscriber report task
-
         const scheduledTask = async () => {
             try {
                 const count = await getSubscriberCount();
-                const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
+            //    const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
+                const greeting = new Date().getHours() < 12 ? 'Morning report of the day.' : 'Final count and report for the day.';
+                const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\n${greeting}`;
                 const targetIds = ['917004501523@c.us', '916200493605@c.us'];
                 let csvMedia = null;
                 try {
@@ -3433,15 +3084,7 @@ client.on('ready', async () => {
             }
         };
 
-        cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); } catch (e) {} }, { timezone: "Asia/Kolkata" });
-
-        // Schedule 1: Runs every 2 hours from 9 AM to 11 PM on the hour.
-        cron.schedule('0 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
-
-        // Schedule 2: Runs one final time daily at 11:50 PM.
-        cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
-
-        // Daily Subscriber Report CSV Downloading and Count Share
+        cron.schedule('0 9 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // ANP Status Check Task
@@ -3460,19 +3103,7 @@ client.on('ready', async () => {
     }
 });
 
-
-// -- Handler for displaying the QR code on startup --
-
-const generateQRCode = (qr) => {
-    console.log('Scan the QR code below to login:');
-    qrcode.generate(qr, {
-        small: true
-    });
-};
-
 client.on('qr', generateQRCode);
-
-// -- Handler for incoming messages --
 
 client.on('message', (message) => {
     if (message.timestamp * 1000 < botStartTime) {
@@ -3482,6 +3113,5 @@ client.on('message', (message) => {
     handleIncomingMessage(message);
 });
 
-// -- Starts the WhatsApp client connection process --
 
 client.initialize();
