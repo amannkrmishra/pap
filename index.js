@@ -3624,7 +3624,7 @@ client.on('ready', async () => {
         cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
-        cron.schedule('55 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+        cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
@@ -3659,5 +3659,6 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
+
 
 client.initialize();
