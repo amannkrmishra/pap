@@ -3435,8 +3435,11 @@ client.on('ready', async () => {
 
         cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); } catch (e) {} }, { timezone: "Asia/Kolkata" });
 
-        // ANP Subscriber Count Tracking (runs every 9 mins, from 9 AM to 11 PM)
-        cron.schedule('*/9 9-23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
+        // Schedule 1: Runs every 2 hours from 9 AM to 11 PM on the hour.
+        cron.schedule('0 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
+
+        // Schedule 2: Runs one final time daily at 11:50 PM.
+        cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
 
         // Daily Subscriber Report CSV Downloading and Count Share
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
