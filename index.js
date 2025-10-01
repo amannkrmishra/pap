@@ -279,6 +279,7 @@ const loadConsolidatedData = (filename = 'AllData.xlsx') => {
 
             if (anpName && !partnerNameLookupCache.has(anpName)) {
                 partnerNameLookupCache.set(anpName, {
+                    'ANP Contact No': row['ANP Contact No'],
                     'District': row['District'],
                     'Cluster': row['Cluster'],
                     'Marketing Team': row['Marketing Team'],
@@ -468,7 +469,7 @@ const loadAnpReportState = () => {
 
 const createActiveCSV = (data) => {
 const headers = [
-    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry', 'Date',
+    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'ANP Contact No', 'Expiry', 'Date',
     'District', 'Cluster', 'Marketing Team', 'Marketing Team No.', 'Mobile Number', 'Package Name',
     'Balance', 'Conversation Remark', 'Final Remark'
 ];
@@ -489,7 +490,7 @@ const headers = [
 
 const createInactiveCSV = (data) => {
 const headers = [
-    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'Expiry',
+    'Subscriber ID', 'Username', 'Status', 'Registration Date', 'Partner Name', 'ANP Contact No', 'Expiry',
     'Date', 'District', 'Cluster', 'Marketing Team', 'Marketing Team No.', 'Mobile Number',
     'Conversation Remark', 'Final Remark'
 ];
@@ -1562,6 +1563,7 @@ const filterActiveSubscribers = async (message) => {
                 'Registration Date': row.registrationdate || '',
                 'Expiry': row.expiry || '',
                 'Partner Name': partnerName,
+                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '',
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
                 'Cluster': partnerDetails ? partnerDetails['Cluster'] : '',
@@ -1680,6 +1682,7 @@ const filterInactiveSubscribers = async (message) => {
                 'Registration Date': row.registrationdate || '',
                 'Expiry': row.expiry || '',
                 'Partner Name': partnerName,
+                'ANP Contact No': partnerDetails ? partnerDetails['ANP Contact No'] : '',
                 'Mobile Number': row.mobileno || '',
                 'Date': currentDate,
                 'District': partnerDetails ? partnerDetails['District'] : '',
