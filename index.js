@@ -1781,14 +1781,16 @@ const runDailySubscriptionNotifier = async () => {
         
         const inactivePartnerData = new Map();
         for (const user of inactiveUsers) {
-            const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} has expired. Please recharge to continue enjoying our services. Thank you.`;
-          //  await sendMessageToNumber(user['Mobile Number'], subscriberMsg);  // to send msg enable
-          //  await new Promise(resolve => setTimeout(resolve, 500));  // to send msg enable
-
-            const partnerContact = user['ANP Contact No'];
-            if (partnerContact) {
-                if (!inactivePartnerData.has(partnerContact)) inactivePartnerData.set(partnerContact, []);
-                inactivePartnerData.get(partnerContact).push(user.Username);
+            if (ANP_CONFIG.AMAN_DISTRICTS.has(user['District'])) {
+                const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} has expired. Please recharge to continue enjoying our services. Thank you.`;
+                // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+                // await new Promise(resolve => setTimeout(resolve, 500));
+    
+                const partnerContact = user['ANP Contact No'];
+                if (partnerContact) {
+                    if (!inactivePartnerData.has(partnerContact)) inactivePartnerData.set(partnerContact, []);
+                    inactivePartnerData.get(partnerContact).push(user.Username);
+                }
             }
         }
 
@@ -1804,14 +1806,16 @@ const runDailySubscriptionNotifier = async () => {
 
         const activePartnerData = new Map();
         for (const user of activeUsers) {
-            const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} is expiring tomorrow. Please recharge in time to avoid service interruption. Thank you.`;
-          //  await sendMessageToNumber(user['Mobile Number'], subscriberMsg); // to send msg enable
-          //  await new Promise(resolve => setTimeout(resolve, 500));  // to send msg enable
-
-            const partnerContact = user['ANP Contact No'];
-            if (partnerContact) {
-                if (!activePartnerData.has(partnerContact)) activePartnerData.set(partnerContact, []);
-                activePartnerData.get(partnerContact).push(user.Username);
+            if (ANP_CONFIG.AMAN_DISTRICTS.has(user['District'])) {
+                const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} is expiring tomorrow. Please recharge in time to avoid service interruption. Thank you.`;
+                // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+                // await new Promise(resolve => setTimeout(resolve, 500));
+    
+                const partnerContact = user['ANP Contact No'];
+                if (partnerContact) {
+                    if (!activePartnerData.has(partnerContact)) activePartnerData.set(partnerContact, []);
+                    activePartnerData.get(partnerContact).push(user.Username);
+                }
             }
         }
 
@@ -3554,9 +3558,9 @@ client.on('ready', async () => {
         // ANP Status Check Task
         cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
-        // Daily Subscription Expiry Notifier every day at 8:30 PM IST
+        // Daily Subscription Expiry Notifier every day at 8:00 PM IST
 
-        cron.schedule('30 20 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        cron.schedule('0 20 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Ticket Monitoring Task
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
@@ -3594,6 +3598,5 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
-
 
 client.initialize();
