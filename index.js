@@ -1789,7 +1789,7 @@ const runDailySubscriptionNotifier = async () => {
                 // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
                 // await new Promise(resolve => setTimeout(resolve, 500));
     
-                const partnerContact = user['ANP Contact No'];
+                const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
                     if (!inactivePartnerData.has(partnerContact)) inactivePartnerData.set(partnerContact, []);
                     inactivePartnerData.get(partnerContact).push(user.Username);
@@ -1818,7 +1818,8 @@ const runDailySubscriptionNotifier = async () => {
                 // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
                 // await new Promise(resolve => setTimeout(resolve, 500));
     
-                const partnerContact = user['ANP Contact No'];
+                const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
+
                 if (partnerContact) {
                     if (!activePartnerData.has(partnerContact)) activePartnerData.set(partnerContact, []);
                     activePartnerData.get(partnerContact).push(user.Username);
@@ -3566,7 +3567,7 @@ client.on('ready', async () => {
         cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
         // Daily Subscription Expiry Notifier every day at 8:50 PM IST
-        cron.schedule('25 21 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        cron.schedule('38 21 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Ticket Monitoring Task
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
