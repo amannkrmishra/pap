@@ -1778,6 +1778,9 @@ const runDailySubscriptionNotifier = async () => {
         // --- 1. Process INACTIVE users (expired yesterday) ---
         const inactiveUsers = await filterInactiveSubscribers(null, formatDate(yesterday), formatDate(today));
         console.log(`[Notifier] Found ${inactiveUsers.length} recently inactive users.`);
+        if (inactiveUsers.length > 0) {
+            console.log('[Notifier Debug] First inactive user object:', JSON.stringify(inactiveUsers[0], null, 2));
+        }
         
         const inactivePartnerData = new Map();
         for (const user of inactiveUsers) {
@@ -1803,6 +1806,10 @@ const runDailySubscriptionNotifier = async () => {
         // --- 2. Process ACTIVE users (expiring tomorrow) ---
         const activeUsers = await filterActiveSubscribers(null, formatDate(tomorrow), formatDate(tomorrow));
         console.log(`[Notifier] Found ${activeUsers.length} users expiring tomorrow.`);
+
+        if (activeUsers.length > 0) {
+            console.log('[Notifier Debug] First active user object:', JSON.stringify(activeUsers[0], null, 2));
+        }
 
         const activePartnerData = new Map();
         for (const user of activeUsers) {
@@ -3559,7 +3566,7 @@ client.on('ready', async () => {
         cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
         // Daily Subscription Expiry Notifier every day at 8:50 PM IST
-        cron.schedule('50 20 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        cron.schedule('25 21 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Ticket Monitoring Task
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
