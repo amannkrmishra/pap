@@ -3554,9 +3554,9 @@ client.on('ready', async () => {
         // ANP Status Check Task
         cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
-        // Daily Subscription Expiry Notifier every day at 8:00 PM IST
+        // Daily Subscription Expiry Notifier every day at 8:30 PM IST
 
-        cron.schedule('0 20 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        cron.schedule('30 20 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Ticket Monitoring Task
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
@@ -3594,5 +3594,6 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
+
 
 client.initialize();
