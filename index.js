@@ -1480,13 +1480,21 @@ const handlePlanChange = async (message) => {
 
 // -- Filters the Active Subscriber CSV report based on package and balance criteria and sends the resulting CSV --
 
-const filterActiveSubscribers = async (message) => {
-    const chat = await message.getChat();
+const filterActiveSubscribers = async (message, fromDateOverride = null, toDateOverride = null) => {
+    const isInteractive = !!message;
+    let chat;
     try {
-        await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
-        const fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
-        await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
-        const toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        let fromDate, toDate;
+        if (isInteractive) {
+            chat = await message.getChat();
+            await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
+            fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+            await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
+            toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        } else {
+            fromDate = fromDateOverride;
+            toDate = toDateOverride;
+        }
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
@@ -1579,44 +1587,51 @@ const filterActiveSubscribers = async (message) => {
         }
 
         // Create summary
-        const summary = `Active Filter Results:\n\n` +
-                       `Total rows processed: ${lines.length - 1}\n` +
-                       `Rows kept: ${filteredData.length}\n` +
-                       `Removed (Balance > 100): ${removedForBalance}\n` +
-                       `Removed (Package Filter): ${removedForPackage}`;
+        if (isInteractive) {
+            const summary = `Active Filter Results:\n\n` +
+                           `Total rows processed: ${lines.length - 1}\n` +
+                           `Rows kept: ${filteredData.length}\n` +
+                           `Removed (Balance > 100): ${removedForBalance}\n` +
+                           `Removed (Package Filter): ${removedForPackage}`;
+            await chat.sendMessage(summary);
 
-        await chat.sendMessage(summary);
-
-        // Create and send CSV file
-        if (filteredData.length > 0) {
-            const csvContent = createActiveCSV(filteredData);
-            const fileName = `${new Date().toISOString().split('T')[0]}_Active_Filtered.csv`;
-            const filePath = path.join(__dirname, fileName);
-            fs.writeFileSync(filePath, csvContent);
-            
-            const media = MessageMedia.fromFilePath(filePath);
-            await chat.sendMessage(media, { caption: 'Filtered Active Subscribers' });
-            
-            setTimeout(() => {
-                try { fs.unlinkSync(filePath); } catch {}
-            }, 5000);
+            if (filteredData.length > 0) {
+                const csvContent = createActiveCSV(filteredData);
+                const fileName = `${new Date().toISOString().split('T')[0]}_Active_Filtered.csv`;
+                const filePath = path.join(__dirname, fileName);
+                fs.writeFileSync(filePath, csvContent);
+                const media = MessageMedia.fromFilePath(filePath);
+                await chat.sendMessage(media, { caption: 'Filtered Active Subscribers' });
+                setTimeout(() => { try { fs.unlinkSync(filePath); } catch {} }, 5000);
+            }
+        } else {
+            return filteredData; // Return data for automated tasks
         }
 
     } catch (error) {
         console.error('Error in filterActiveSubscribers:', error.message);
-        await chat.sendMessage("Error processing active filter: " + error.message);
+        if (isInteractive) await chat.sendMessage("Error processing active filter: " + error.message);
+        return []; // Return empty array on error for automated tasks
     }
 };
 
 // -- Filters the Inactive Subscriber CSV report based on package and registration date criteria and sends the resulting CSV --
 
-const filterInactiveSubscribers = async (message) => {
-    const chat = await message.getChat();
+const filterInactiveSubscribers = async (message, fromDateOverride = null, toDateOverride = null) => {
+    const isInteractive = !!message;
+    let chat;
     try {
-        await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
-        const fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
-        await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
-        const toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        let fromDate, toDate;
+        if (isInteractive) {
+            chat = await message.getChat();
+            await chat.sendMessage("Enter FROM date (DD-MM-YYYY):");
+            fromDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+            await chat.sendMessage("Enter TO date (DD-MM-YYYY):");
+            toDate = (await waitForReply(message)).body.trim().split('-').reverse().join('-');
+        } else {
+            fromDate = fromDateOverride;
+            toDate = toDateOverride;
+        }
         const cookies = sessionCache;
         const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
         
@@ -1695,33 +1710,122 @@ const filterInactiveSubscribers = async (message) => {
         }
 
         // Create summary
-        const summary = `Inactive Filter Results:\n\n` +
-                       `Total rows processed: ${lines.length - 1}\n` +
-                       `Rows kept: ${filteredData.length}\n` +
-                       `Removed (Package Filter): ${removedForPackage}\n` +
-                       `Removed (Current Month): ${removedForCurrentMonth}`;
+        if (isInteractive) {
+            const summary = `Inactive Filter Results:\n\n` +
+                           `Total rows processed: ${lines.length - 1}\n` +
+                           `Rows kept: ${filteredData.length}\n` +
+                           `Removed (Package Filter): ${removedForPackage}\n` +
+                           `Removed (Current Month): ${removedForCurrentMonth}`;
+            await chat.sendMessage(summary);
 
-        await chat.sendMessage(summary);
-
-        // Create and send CSV file
-        if (filteredData.length > 0) {
-            const csvContent = createInactiveCSV(filteredData);
-            const fileName = `${new Date().toISOString().split('T')[0]}_Inactive_Filtered.csv`;
-            const filePath = path.join(__dirname, fileName);
-            fs.writeFileSync(filePath, csvContent);
-            
-            const media = MessageMedia.fromFilePath(filePath);
-            await chat.sendMessage(media, { caption: 'Filtered Inactive Subscribers' });
-            
-            setTimeout(() => {
-                try { fs.unlinkSync(filePath); } catch {}
-            }, 5000);
+            if (filteredData.length > 0) {
+                const csvContent = createInactiveCSV(filteredData);
+                const fileName = `${new Date().toISOString().split('T')[0]}_Inactive_Filtered.csv`;
+                const filePath = path.join(__dirname, fileName);
+                fs.writeFileSync(filePath, csvContent);
+                const media = MessageMedia.fromFilePath(filePath);
+                await chat.sendMessage(media, { caption: 'Filtered Inactive Subscribers' });
+                setTimeout(() => { try { fs.unlinkSync(filePath); } catch {} }, 5000);
+            }
+        } else {
+            return filteredData; // Return data for automated tasks
         }
 
     } catch (error) {
         console.error('Error in filterInactiveSubscribers:', error.message);
-        await chat.sendMessage("Error processing inactive filter: " + error.message);
+        if (isInteractive) await chat.sendMessage("Error processing inactive filter: " + error.message);
+        return []; // Return empty array on error for automated tasks
     }
+};
+
+/* ----------------------------------------------------------------
+Section 5.5: Automated Subscription Notifier
+------------------------------------------------------------------- */
+
+// -- Sends a WhatsApp message to a specific phone number --
+const sendMessageToNumber = async (number, message) => {
+    try {
+        if (!number || typeof number !== 'string' || number.length < 10) {
+            console.warn(`[Notifier] Invalid or missing phone number: ${number}. Skipping.`);
+            return;
+        }
+        const sanitizedNumber = number.replace(/\D/g, '');
+        const chatId = `${sanitizedNumber.startsWith('91') ? '' : '91'}${sanitizedNumber}@c.us`;
+
+        await client.sendMessage(chatId, message);
+        console.log(`[Notifier] Successfully sent message to ${number}`);
+    } catch (error) {
+        console.error(`[Notifier] Failed to send message to ${number}: ${error.message}`);
+    }
+};
+
+// -- Main function for the daily cron job to notify users and partners --
+const runDailySubscriptionNotifier = async () => {
+    console.log('Starting daily subscription notifier job...');
+    if (!sessionCache) {
+        console.error('[Notifier] Aborting: No active session available.');
+        return;
+    }
+
+    const formatDate = (date) => date.toISOString().split('T')[0];
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    const tomorrow = new Date();
+    tomorrow.setDate(today.getDate() + 1);
+
+    try {
+        // --- 1. Process INACTIVE users (expired yesterday) ---
+        const inactiveUsers = await filterInactiveSubscribers(null, formatDate(yesterday), formatDate(today));
+        console.log(`[Notifier] Found ${inactiveUsers.length} recently inactive users.`);
+        
+        const inactivePartnerData = new Map();
+        for (const user of inactiveUsers) {
+            const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} has expired. Please recharge to continue enjoying our services. Thank you.`;
+            await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const partnerContact = user['ANP Contact No'];
+            if (partnerContact) {
+                if (!inactivePartnerData.has(partnerContact)) inactivePartnerData.set(partnerContact, []);
+                inactivePartnerData.get(partnerContact).push(user.Username);
+            }
+        }
+
+        for (const [partnerContact, usernames] of inactivePartnerData.entries()) {
+            let partnerMsg = `Dear Partner, the following customers have recently become inactive. Please follow up for renewal:\n\n${usernames.join('\n')}\n\nThank you.`;
+            await sendMessageToNumber(partnerContact, partnerMsg);
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        // --- 2. Process ACTIVE users (expiring tomorrow) ---
+        const activeUsers = await filterActiveSubscribers(null, formatDate(tomorrow), formatDate(tomorrow));
+        console.log(`[Notifier] Found ${activeUsers.length} users expiring tomorrow.`);
+
+        const activePartnerData = new Map();
+        for (const user of activeUsers) {
+            const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} is expiring tomorrow. Please recharge in time to avoid service interruption. Thank you.`;
+            await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const partnerContact = user['ANP Contact No'];
+            if (partnerContact) {
+                if (!activePartnerData.has(partnerContact)) activePartnerData.set(partnerContact, []);
+                activePartnerData.get(partnerContact).push(user.Username);
+            }
+        }
+
+        for (const [partnerContact, usernames] of activePartnerData.entries()) {
+            let partnerMsg = `Dear Partner, the following customers are expiring tomorrow. Please remind them to recharge:\n\n${usernames.join('\n')}\n\nThank you.`;
+            await sendMessageToNumber(partnerContact, partnerMsg);
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+    } catch (error) {
+        console.error('CRITICAL ERROR in daily subscription notifier:', error.message);
+    }
+
+    console.log('Daily subscription notifier job finished.');
 };
 
 /* ----------------------------------------------------------------
@@ -3449,6 +3553,10 @@ client.on('ready', async () => {
 
         // ANP Status Check Task
         cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
+
+        // Daily Subscription Expiry Notifier every day at 8:00 PM IST
+
+        cron.schedule('0 20 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Ticket Monitoring Task
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
