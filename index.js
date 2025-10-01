@@ -3350,7 +3350,7 @@ client.on('ready', async () => {
 
     const forceRefreshSession = async () => {
         try {
-            const freshPortalSession = await authenticate('admin', 'Pass@123');
+            const freshPortalSession = await authenticate('support', 'Wave&light1');
             const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
             sessionCache = freshPortalSession;
             nmsSessionCache = freshNmsCookie;
