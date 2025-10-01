@@ -95,7 +95,7 @@ const ALLOWED_TICKET_SUBJECTS = new Set([
 // -- Configuration for automated ticket monitoring - target number and cron schedule
 const TICKET_MONITOR_CONFIG = {
     TARGET_ID: '916200493605@c.us',
-    CRON_SCHEDULE: '*/10 * * * *'
+    CRON_SCHEDULE: '*/30 * * * *' // Runs every 30 minutes
 };
 
 
@@ -1745,23 +1745,34 @@ Section 5.5: Automated Subscription Notifier
 // -- Sends a WhatsApp message to a specific phone number --
 const sendMessageToNumber = async (number, message) => {
     try {
-        if (!number || typeof number !== 'string' || number.length < 10) {
-            console.warn(`[Notifier] Invalid or missing phone number: ${number}. Skipping.`);
+        // Step 1: Basic validation and conversion to string.
+        if (!number) {
+            console.warn(`[Notifier] Received a null or undefined number. Skipping.`);
             return;
         }
-        const sanitizedNumber = number.replace(/\D/g, '');
-        const chatId = `${sanitizedNumber.startsWith('91') ? '' : '91'}${sanitizedNumber}@c.us`;
+        // Sanitize by removing all non-digits.
+        let sanitizedNumber = String(number).replace(/\D/g, '');
 
+        // Step 2: Enforce the "always 10 digits" rule for safety.
+        if (sanitizedNumber.length !== 10) {
+            console.warn(`[Notifier] Invalid number format for "${number}". Expected 10 digits, but got ${sanitizedNumber.length}. Skipping.`);
+            return;
+        }
+
+        // Step 3: Apply the simple, correct logic: ALWAYS prepend '91'.
+        const finalNumber = '91' + sanitizedNumber;
+
+        const chatId = `${finalNumber}@c.us`;
         await client.sendMessage(chatId, message);
-        console.log(`[Notifier] Successfully sent message to ${number}`);
+        console.log(`[Notifier] Successfully sent message to original number "${number}" (Formatted as ${chatId})`);
+
     } catch (error) {
-        console.error(`[Notifier] Failed to send message to ${number}: ${error.message}`);
+        console.error(`[Notifier] Failed to send message to original number "${number}": ${error.message}`);
     }
 };
 
 // -- Main function for the daily cron job to notify users and partners --
 const runDailySubscriptionNotifier = async () => {
-    console.log('Starting daily subscription notifier job...');
     if (!sessionCache) {
         console.error('[Notifier] Aborting: No active session available.');
         return;
@@ -1774,71 +1785,103 @@ const runDailySubscriptionNotifier = async () => {
     const tomorrow = new Date();
     tomorrow.setDate(today.getDate() + 1);
 
+    const partnerNotificationsMap = new Map();
+    let totalInactive = 0;
+    let totalActive = 0;
+
     try {
-        // --- 1. Process INACTIVE users (expired yesterday) ---
+        // --- Step 1: Process INACTIVE users and collect data ---
         const inactiveUsers = await filterInactiveSubscribers(null, formatDate(yesterday), formatDate(today));
-        console.log(`[Notifier] Found ${inactiveUsers.length} recently inactive users.`);
-        if (inactiveUsers.length > 0) {
-            console.log('[Notifier Debug] First inactive user object:', JSON.stringify(inactiveUsers[0], null, 2));
-        }
-        
-        const inactivePartnerData = new Map();
+        totalInactive = inactiveUsers.length;
+
         for (const user of inactiveUsers) {
             if (ANP_CONFIG.AMAN_DISTRICTS.has(user['District'])) {
-                const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} has expired. Please recharge to continue enjoying our services. Thank you.`;
+                // Improved message for expired users
+                let subscriberMsg = "";
+                subscriberMsg += `⚠️ Dear Customer,\n\n`;
+                subscriberMsg += `Your Railwire account (${user.Username}) has *expired*.\n\n`;
+                subscriberMsg += `Recharge *today* to instantly restore your high-speed internet and avoid inconvenience.\n`;
+                subscriberMsg += `👉 Don’t miss out – stay connected with Railwire.`;
+
                 // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
                 // await new Promise(resolve => setTimeout(resolve, 500));
-    
+
                 const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
-                    if (!inactivePartnerData.has(partnerContact)) inactivePartnerData.set(partnerContact, []);
-                    inactivePartnerData.get(partnerContact).push(user.Username);
+                    if (!partnerNotificationsMap.has(partnerContact)) {
+                        partnerNotificationsMap.set(partnerContact, { active: [], inactive: [], name: user['Partner Name'] });
+                    }
+                    partnerNotificationsMap.get(partnerContact).inactive.push(user.Username);
                 }
             }
         }
 
-        for (const [partnerContact, usernames] of inactivePartnerData.entries()) {
-            let partnerMsg = `Dear Partner, the following customers have recently become inactive. Please follow up for renewal:\n\n${usernames.join('\n')}\n\nThank you.`;
-            await sendMessageToNumber(partnerContact, partnerMsg);
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        // --- 2. Process ACTIVE users (expiring tomorrow) ---
+        // --- Step 2: Process ACTIVE users and collect data ---
         const activeUsers = await filterActiveSubscribers(null, formatDate(tomorrow), formatDate(tomorrow));
-        console.log(`[Notifier] Found ${activeUsers.length} users expiring tomorrow.`);
+        totalActive = activeUsers.length;
 
-        if (activeUsers.length > 0) {
-            console.log('[Notifier Debug] First active user object:', JSON.stringify(activeUsers[0], null, 2));
-        }
-
-        const activePartnerData = new Map();
         for (const user of activeUsers) {
             if (ANP_CONFIG.AMAN_DISTRICTS.has(user['District'])) {
-                const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} is expiring tomorrow. Please recharge in time to avoid service interruption. Thank you.`;
+                // Improved message for expiring tomorrow
+                let subscriberMsg = "";
+                subscriberMsg += `⏳ Dear Customer,\n\n`;
+                subscriberMsg += `Your Railwire account (${user.Username}) will *expire tomorrow*.\n\n`;
+                subscriberMsg += `Recharge *before midnight* to ensure *uninterrupted internet service*.\n`;
+                subscriberMsg += `Stay connected with Railwire – recharge now!`;
+
                 // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
                 // await new Promise(resolve => setTimeout(resolve, 500));
-    
-                const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
 
+                const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
-                    if (!activePartnerData.has(partnerContact)) activePartnerData.set(partnerContact, []);
-                    activePartnerData.get(partnerContact).push(user.Username);
+                    if (!partnerNotificationsMap.has(partnerContact)) {
+                        partnerNotificationsMap.set(partnerContact, { active: [], inactive: [], name: user['Partner Name'] });
+                    }
+                    partnerNotificationsMap.get(partnerContact).active.push(user.Username);
                 }
             }
         }
 
-        for (const [partnerContact, usernames] of activePartnerData.entries()) {
-            let partnerMsg = `Dear Partner, the following customers are expiring tomorrow. Please remind them to recharge:\n\n${usernames.join('\n')}\n\nThank you.`;
+        // --- Step 3: Build and send the single, combined message to each partner ---
+        for (const [partnerContact, data] of partnerNotificationsMap.entries()) {
+            let partnerMsg = "";
+            partnerMsg += `*📢 Dear Partner,*\n\n`;
+            partnerMsg += `Please take quick action to support your subscribers and avoid service disruption:\n`;
+
+            if (data.inactive.length > 0) {
+                partnerMsg += `\n❌ *Expired Users (Inactive since yesterday – ${data.inactive.length}):*\n`;
+                partnerMsg += data.inactive.join('\n');
+                partnerMsg += `\n`;
+            }
+
+            if (data.active.length > 0) {
+                partnerMsg += `\n⏳ *Expiring Tomorrow (by 11:59 PM – ${data.active.length}):*\n`;
+                partnerMsg += data.active.join('\n');
+                partnerMsg += `\n`;
+            }
+
+            partnerMsg += `\n✅ Kindly *coordinate with these subscribers immediately* and encourage them to recharge without delay.\n`;
+            partnerMsg += `*Thank you for your continued support.* 🙏`;
+
             await sendMessageToNumber(partnerContact, partnerMsg);
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 500)); // Delay between sending to different partners
         }
 
     } catch (error) {
         console.error('CRITICAL ERROR in daily subscription notifier:', error.message);
     }
 
-    console.log('Daily subscription notifier job finished.');
+    // --- Step 4: Final Summary Log ---
+    let summary = `[DAILY NOTIFIER] Job finished.`;
+    if (partnerNotificationsMap.size > 0) {
+        const partnerNames = Array.from(partnerNotificationsMap.values()).map(data => data.name);
+        summary += ` | Combined alerts sent to ${partnerNotificationsMap.size} partners: ${partnerNames.join(', ')}`;
+    } else {
+        summary += ` | No expiry notifications sent.`;
+    }
+    console.log(summary);
 };
+
 
 /* ----------------------------------------------------------------
 Section 6: ANP Monitoring (NMS) Features
@@ -1903,7 +1946,6 @@ const getLiveOnlineCount = async (partnerId, nmsCookie) => {
 const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
     const startTime = new Date();
     const timeStamp = startTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    console.log(`\nTriggered by: ${triggeredBy} | Time: ${timeStamp}`);
 
     if (!sessionCache || !nmsSessionCache) {
         console.error('ANP Check failed: Authentication session is not available.');
@@ -1916,17 +1958,13 @@ const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
             throw new Error('Could not obtain NMS session');
         }
 
-        console.log(`Fetching all partners...`);
         const allPartners = await getAllPartners(authData);
-        console.log(`Found ${allPartners.length} total partners`);
         
         const partnersToCheck = allPartners.filter(p => p.total_subs > 0);
-        console.log(`Checking ${partnersToCheck.length} partners with subscribers...`);
 
         const checkPartnerStatus = async (partner) => {
             const liveCount = await getLiveOnlineCount(partner.id, authData.nmsCookie);
             const status = liveCount === 'Error' ? 'ERROR' : liveCount === 0 ? 'DOWN' : 'OK';
-            console.log(`${partner.name} | Online Users: ${liveCount} / ${partner.total_subs} | Status: ${status}`);
             return { ...partner, live_subs: liveCount };
         };
         
@@ -2010,12 +2048,20 @@ const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
         }
 
         if (!recoveredPartners.length && !amansStillDownPartners.length && !newAlerts.length) {
-            console.log(`✅ All partners healthy - no issues detected`);
         }
-        
         const endTime = new Date();
-        const duration = ((endTime - startTime) / 1000).toFixed(2);
-        console.log(`\nTotal duration: ${duration} seconds | Completed: ${endTime.toLocaleTimeString('en-US', { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' })}\n`);
+            const duration = ((endTime - startTime) / 1000).toFixed(2);
+            let summary = `[ANP STATUS] Check complete in ${duration}s.`;
+            if (newAlerts.length > 0) {
+                summary += ` | New Down: ${newAlerts.map(p => p.name).join(', ')}`;
+            }
+            if (recoveredPartners.length > 0) {
+                summary += ` | Recovered: ${recoveredPartners.map(p => p.name).join(', ')}`;
+            }
+            if (newAlerts.length === 0 && recoveredPartners.length === 0) {
+                summary += ` | All links stable.`;
+            }
+            console.log(summary);
     } catch (error) {
         console.error(`\nANP Check CRITICAL ERROR after retries: ${error.message}`);
     }
@@ -2097,6 +2143,17 @@ const checkAnpCountsAndNotify = async (manualTriggerChatId = null) => {
         }
 
         saveAnpCountsState(currentCounts);
+        let summary = `[ANP COUNTS] Check complete.`;
+        if (increased.length > 0) {
+            summary += ` | Increased: ${increased.map(i => i.split(':')[0]).join(', ')}`;
+        }
+        if (decreased.length > 0) {
+            summary += ` | Decreased: ${decreased.map(d => d.split(':')[0]).join(', ')}`;
+        }
+        if (increased.length === 0 && decreased.length === 0) {
+            summary += ` | No changes in subscriber counts.`;
+        }
+        console.log(summary);
 
     } catch (error) {
         console.error('Error during ANP count check:', error.message);
@@ -2215,8 +2272,7 @@ const getTicketDetails = async (ticketUrl, cookies) => {
 
 const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
     try {
-        console.log(`Ticket monitoring started - Triggered by: ${triggeredBy}`);
-        
+        const alertedTickets = [];
         const cookies = sessionCache;
         const apiClient = axios.create({
             baseURL: 'https://jh.railwire.co.in',
@@ -2252,7 +2308,6 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
         }
 
         if (ticketsToCheck.length === 0) {
-            console.log(`No "Open" or "Progress" tickets found for allowed subjects (${triggeredBy})`);
             return;
         }
 
@@ -2263,14 +2318,11 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
             if (ticketDetails) {
                 // Handle missing cluster data
                 if (!ticketDetails.cluster) {
-                    console.log(`Skipping ticket #${ticket.ticketId} - No cluster data available`);
                     continue;
                 }
                 
                 // Case-insensitive cluster check
                 if (ticketDetails.cluster.toLowerCase() !== 'tatanagar') {
-                    console.log(`[TicketMonitor] Skipping ticket #${ticket.ticketId} - Cluster "${ticketDetails.cluster}" is not Tatanagar.`);
-                    console.log(`Skipping ticket #${ticket.ticketId} - Cluster: ${ticketDetails.cluster}`);
                     continue;
                 }
                 
@@ -2279,27 +2331,28 @@ const monitorAndAlertTickets = async (triggeredBy = 'cron') => {
 
                 // SCENARIO 1: Brand new ticket
                 if (!lastKnownState) {
-                    console.log(`New ticket found: #${ticket.ticketId} (${triggeredBy})`);
                     changesFound = true;
                     const formattedMessage = formatTicketMessage(ticketDetails);
                     await sendTicketAlert(formattedMessage);
                     processedTicketsState[ticket.ticketId] = { messageCount: currentMessageCount };
+                    alertedTickets.push(`#${ticket.ticketId} (${ticketDetails.district})`);
                     saveProcessedTicketsState(); // Save state immediately
                 } 
                 // SCENARIO 2: Existing ticket has a new reply
                 else if (lastKnownState.messageCount < currentMessageCount) {
-                    console.log(`Update found for ticket #${ticket.ticketId} (New message) - ${triggeredBy}`);
                     changesFound = true;
                     const formattedMessage = formatTicketMessage(ticketDetails);
                     await sendTicketAlert(formattedMessage);
                     processedTicketsState[ticket.ticketId].messageCount = currentMessageCount;
+                    alertedTickets.push(`#${ticket.ticketId} (${ticketDetails.district}) - New Reply`);
                     saveProcessedTicketsState(); // Save updated state
                 }
             }
         }
-
-        if (!changesFound) {
-            console.log(`Checked ${ticketsToCheck.length} active tickets. No new messages or tickets found (${triggeredBy})`);
+        if (alertedTickets.length > 0) {
+        console.log(`[TICKET MONITOR] Check complete. Alerts sent for: ${alertedTickets.join('; ')}.`);
+        } else {
+        console.log(`[TICKET MONITOR] Check complete. No new tickets or replies found.`);
         }
     } catch (error) {
         console.error(`Error during ticket monitoring (${triggeredBy}):`, error.message);
@@ -3552,25 +3605,26 @@ client.on('ready', async () => {
             }
         };
 
+        // Housekeeping at midnight
         cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); } catch (e) {} }, { timezone: "Asia/Kolkata" });
 
-        // Schedule 1: Runs every 2 hours from 9 AM to 11 PM on the hour.
-        cron.schedule('0 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
-
-        // Schedule 2: Runs one final time daily at 11:50 PM.
-        cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
-
-        // Daily Subscriber Report CSV Downloading and Count Share
-        cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
-
-        // ANP Status Check Task
+        // High-frequency ANP status check (every 9 mins)
         cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
-        // Daily Subscription Expiry Notifier every day at 8:50 PM IST
-        cron.schedule('38 21 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
-
-        // Ticket Monitoring Task
+        // Ticket monitoring (every 30 mins)
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
+
+        // Daily subscription expiry notifier (runs once at 9:05 AM)
+        cron.schedule('5 9 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+
+        // ANP count check (every 2 hours, offset)
+        cron.schedule('3 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
+
+        // Final ANP count check for the day
+        cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
+
+        // Daily subscriber report and CSV download
+        cron.schedule('55 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
