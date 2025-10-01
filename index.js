@@ -1782,8 +1782,8 @@ const runDailySubscriptionNotifier = async () => {
         const inactivePartnerData = new Map();
         for (const user of inactiveUsers) {
             const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} has expired. Please recharge to continue enjoying our services. Thank you.`;
-            await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
-            await new Promise(resolve => setTimeout(resolve, 500));
+          //  await sendMessageToNumber(user['Mobile Number'], subscriberMsg);  // to send msg enable
+          //  await new Promise(resolve => setTimeout(resolve, 500));  // to send msg enable
 
             const partnerContact = user['ANP Contact No'];
             if (partnerContact) {
@@ -1805,8 +1805,8 @@ const runDailySubscriptionNotifier = async () => {
         const activePartnerData = new Map();
         for (const user of activeUsers) {
             const subscriberMsg = `Dear Customer, your Railwire account ${user.Username} is expiring tomorrow. Please recharge in time to avoid service interruption. Thank you.`;
-            await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
-            await new Promise(resolve => setTimeout(resolve, 500));
+          //  await sendMessageToNumber(user['Mobile Number'], subscriberMsg); // to send msg enable
+          //  await new Promise(resolve => setTimeout(resolve, 500));  // to send msg enable
 
             const partnerContact = user['ANP Contact No'];
             if (partnerContact) {
