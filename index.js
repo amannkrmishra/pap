@@ -3553,7 +3553,7 @@ client.on('ready', async () => {
             try {
                 const count = await getSubscriberCount();
                 const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
-                const targetIds = ['917004501523@c.us', '916200493605@c.us'];
+                const targetIds = ['916200493605@c.us']; // '917004501523@c.us', 
                 let csvMedia = null;
                 try {
                     const cookies = sessionCache;
@@ -3655,6 +3655,7 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
+
 
 
 client.initialize();
