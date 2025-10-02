@@ -3675,7 +3675,7 @@ client.on('ready', async () => {
         cron.schedule('5 9 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // ANP count check (every 2 hours, offset)
-        cron.schedule('3 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/KKolkata" });
+        cron.schedule('3 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
 
         // Final ANP count check for the day
         cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
