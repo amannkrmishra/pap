@@ -3584,8 +3584,10 @@ client.on('ready', async () => {
                         await chat.sendMessage(message);
                         if (csvMedia) {
                             await chat.sendMessage(csvMedia, { caption: 'Daily Subscriber Report' });
+                            console.log('Successfully shared in WhatsApp Report!');
                         } else {
                             await chat.sendMessage('Failed to download the daily subscriber report.');
+                            console.log('Failed to share Whatsapp Report!');
                         }
                     } catch (err) {
                         console.error(`Failed to send report to ID ${id}:`, err.message);
@@ -3659,4 +3661,3 @@ client.on('message', (message) => {
 
 
 client.initialize();
-
