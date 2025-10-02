@@ -1780,10 +1780,11 @@ const runDailySubscriptionNotifier = async () => {
 
     const formatDate = (date) => date.toISOString().split('T')[0];
     const today = new Date();
+    
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(today.getDate() - 3);
     const yesterday = new Date();
     yesterday.setDate(today.getDate() - 1);
-    const tomorrow = new Date();
-    tomorrow.setDate(today.getDate() + 1);
 
     const partnerNotificationsMap = new Map();
     let totalInactive = 0;
@@ -1791,7 +1792,7 @@ const runDailySubscriptionNotifier = async () => {
 
     try {
         // --- Step 1: Process INACTIVE users and collect data ---
-        const inactiveUsers = await filterInactiveSubscribers(null, formatDate(yesterday), formatDate(today));
+        const inactiveUsers = await filterInactiveSubscribers(null, formatDate(threeDaysAgo), formatDate(yesterday));
         totalInactive = inactiveUsers.length;
 
         for (const user of inactiveUsers) {
@@ -1809,7 +1810,7 @@ const runDailySubscriptionNotifier = async () => {
                 const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
                     if (!partnerNotificationsMap.has(partnerContact)) {
-                        partnerNotificationsMap.set(partnerContact, { active: [], inactive: [], name: user['Partner Name'] });
+                        partnerNotificationsMap.set(partnerContact, { active: [], inactive: [], name: user['Partner Name'], district: user['District'] });
                     }
                     partnerNotificationsMap.get(partnerContact).inactive.push(user.Username);
                 }
@@ -1817,7 +1818,7 @@ const runDailySubscriptionNotifier = async () => {
         }
 
         // --- Step 2: Process ACTIVE users and collect data ---
-        const activeUsers = await filterActiveSubscribers(null, formatDate(tomorrow), formatDate(tomorrow));
+        const activeUsers = await filterActiveSubscribers(null, formatDate(today), formatDate(today));
         totalActive = activeUsers.length;
 
         for (const user of activeUsers) {
@@ -1825,7 +1826,7 @@ const runDailySubscriptionNotifier = async () => {
                 // Improved message for expiring tomorrow
                 let subscriberMsg = "";
                 subscriberMsg += `⏳ Dear Customer,\n\n`;
-                subscriberMsg += `Your Railwire account (${user.Username}) will *expire tomorrow*.\n\n`;
+                subscriberMsg += `Your Railwire account (${user.Username}) will *expire today*.\n\n`;
                 subscriberMsg += `Recharge *before midnight* to ensure *uninterrupted internet service*.\n`;
                 subscriberMsg += `Stay connected with Railwire – recharge now!`;
 
@@ -1835,7 +1836,7 @@ const runDailySubscriptionNotifier = async () => {
                 const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
                     if (!partnerNotificationsMap.has(partnerContact)) {
-                        partnerNotificationsMap.set(partnerContact, { active: [], inactive: [], name: user['Partner Name'] });
+                        partnerNotificationsMap.set(partnerContact, { active: [], inactive: [], name: user['Partner Name'], district: user['District'] });
                     }
                     partnerNotificationsMap.get(partnerContact).active.push(user.Username);
                 }
@@ -1844,24 +1845,29 @@ const runDailySubscriptionNotifier = async () => {
 
         // --- Step 3: Build and send the single, combined message to each partner ---
         for (const [partnerContact, data] of partnerNotificationsMap.entries()) {
+            const westernDistricts = new Set(['Pashchimi Singhbhum', 'Saraikela-Kharsawan']);
+            const marketingName = westernDistricts.has(data.district) ? 'Rafi Ahmed' : 'Ram Babu Singh';
+            const marketingNumber = westernDistricts.has(data.district) ? '+919204263530' : '+919931111555';
+
             let partnerMsg = "";
-            partnerMsg += `*📢 Dear Partner,*\n\n`;
-            partnerMsg += `Please take quick action to support your subscribers and avoid service disruption:\n`;
+            partnerMsg += `⚠️ *Dear Partner / ANP,*\n\n`;
+            partnerMsg += `Please take a quick look on this your subscriber details:\n\n`;
 
             if (data.inactive.length > 0) {
-                partnerMsg += `\n❌ *Expired Users (Inactive since yesterday – ${data.inactive.length}):*\n`;
+                partnerMsg += `*Expired-User (Last 3 Days):*\n`;
                 partnerMsg += data.inactive.join('\n');
-                partnerMsg += `\n`;
+                partnerMsg += `\n\n`;
             }
 
             if (data.active.length > 0) {
-                partnerMsg += `\n⏳ *Expiring Tomorrow (by 11:59 PM – ${data.active.length}):*\n`;
+                partnerMsg += `*Expiry-Today at 11:59:59 PM:*\n`;
                 partnerMsg += data.active.join('\n');
-                partnerMsg += `\n`;
+                partnerMsg += `\n\n`;
             }
 
-            partnerMsg += `\n✅ Kindly *coordinate with these subscribers immediately* and encourage them to recharge without delay.\n`;
-            partnerMsg += `*Thank you for your continued support.* 🙏`;
+            partnerMsg += `*For any help contact:*\n\n`;
+            partnerMsg += `*Marketing Support*\n${marketingName}\n${marketingNumber}\n\n`;
+            partnerMsg += `*For Technical Support*\nAman Kumar Mishra\n+918294745758`;
 
             await sendMessageToNumber(partnerContact, partnerMsg);
             await new Promise(resolve => setTimeout(resolve, 500)); // Delay between sending to different partners
@@ -3610,14 +3616,8 @@ client.on('ready', async () => {
         // Ticket monitoring (every 30 mins)
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
-        // Daily subscription expiry notifier (runs once at 9:05 AM)
-        cron.schedule('5 9 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
-
-        // ANP count check (every 2 hours, offset)
-        cron.schedule('3 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
-
-        // Final ANP count check for the day
-        cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
+        // Daily subscription expiry notifier (runs once at 12:00 PM)
+        cron.schedule('0 12 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
