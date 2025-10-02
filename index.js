@@ -3512,85 +3512,24 @@ client.on('ready', async () => {
     botStartTime = Date.now();
 
     // --- 2. Define Authentication Refresh Logic ---
-    const COOKIE_REFRESH_INTERVAL = 540000; // 9 minutes (before 10-min expiry)
+    const AUTH_LIFETIME = 490000; // 8 minutes 10 seconds
 
-    // Function to refresh cookies by making an authenticated request
-    const refreshCookies = async () => {
-        try {
-            if (!sessionCache) {
-                console.log('[REFRESH] No session exists, performing full authentication...');
-                await performFullAuthentication();
-                return;
-            }
+    // Function to force refresh portal and NMS sessions
 
-            const cookieString = `${sessionCache.railwireCookie.name}=${sessionCache.railwireCookie.value}; ${sessionCache.ciSessionCookie.name}=${sessionCache.ciSessionCookie.value}`;
-            
-            const response = await axios.get(`${baseURL}/billcntl`, {
-                headers: { 'Cookie': cookieString },
-                timeout: 10000,
-                validateStatus: (status) => status < 500 // Accept redirects and client errors
-            });
-
-            // Check if we got redirected to login (session expired)
-            if (response.request.path && response.request.path.includes('rlogin')) {
-                console.log('[REFRESH] Session expired, performing full authentication...');
-                await performFullAuthentication();
-                return;
-            }
-
-            // Extract refreshed cookies from response
-            const setCookieHeader = response.headers['set-cookie'];
-            if (setCookieHeader && setCookieHeader.length > 0) {
-                let refreshedCount = 0;
-                setCookieHeader.forEach(cookieString => {
-                    // Ignore deleted cookies
-                    if (cookieString.includes('deleted') || cookieString.includes('expires=Thu, 01-Jan-1970')) {
-                        return;
-                    }
-                    
-                    if (cookieString.startsWith('railwire_cookie_name=')) {
-                        const value = cookieString.split(';')[0].split('=')[1];
-                        sessionCache.railwireCookie.value = value;
-                        refreshedCount++;
-                    } else if (cookieString.startsWith('ci_session=')) {
-                        const value = cookieString.split(';')[0].split('=')[1];
-                        sessionCache.ciSessionCookie.value = value;
-                        refreshedCount++;
-                    }
-                });
-                
-                if (refreshedCount > 0) {
-                    console.log(`[REFRESH] Successfully refreshed ${refreshedCount} cookie(s) via lightweight request.`);
-                } else {
-                    console.log('[REFRESH] No fresh cookies received, performing full authentication...');
-                    await performFullAuthentication();
-                }
-            } else {
-                console.log('[REFRESH] No Set-Cookie headers, performing full authentication...');
-                await performFullAuthentication();
-            }
-
-        } catch (err) {
-            console.error('[REFRESH] Cookie refresh failed, attempting full authentication:', err.message);
-            await performFullAuthentication();
-        }
-    };
-
-    // Function to perform full authentication (CAPTCHA + login)
-    const performFullAuthentication = async () => {
+    const forceRefreshSession = async () => {
         try {
             const freshPortalSession = await authenticate('admin', 'Pass@123');
             const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
             sessionCache = freshPortalSession;
             nmsSessionCache = freshNmsCookie;
-            console.log('[AUTH] Full authentication completed successfully.');
+            console.log('Bot is healthy.');
         } catch (err) {
-            console.error('[AUTH] CRITICAL: Full authentication failed:', err.message);
+            console.error('[TIMER] FAILURE: Proactive session refresh failed:', err.message);
             sessionCache = null;
             nmsSessionCache = null;
             const recoveryDelay = 15000; // 15 seconds
-            console.error(`[AUTH] Scheduling recovery attempt in ${recoveryDelay / 1000} seconds.`);
-            setTimeout(performFullAuthentication, recoveryDelay);
+            console.error(`Scheduling recovery attempt in ${recoveryDelay / 1000} seconds.`);
+            setTimeout(forceRefreshSession, recoveryDelay);
             throw err;
         }
     };
@@ -3599,7 +3538,7 @@ client.on('ready', async () => {
     const initialDelay = 3000; // 3 seconds
     try {
         await new Promise(resolve => setTimeout(resolve, initialDelay));
-        await performFullAuthentication(); // <-- Use the new function here
+        await forceRefreshSession();
         console.log('Bot is fully operational.');
 
         // Function for the daily scheduled subscriber report task
@@ -3684,7 +3623,7 @@ client.on('ready', async () => {
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
-        setInterval(refreshCookies, COOKIE_REFRESH_INTERVAL); // <-- Add the new interval here
+        setInterval(forceRefreshSession, AUTH_LIFETIME);
 
         console.log('WhatsApp bot ready to use!!');
 
@@ -3716,5 +3655,6 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
+
 
 client.initialize();
