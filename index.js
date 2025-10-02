@@ -3518,7 +3518,7 @@ client.on('ready', async () => {
     botStartTime = Date.now();
 
     // --- 2. Define Authentication Refresh Logic ---
-    const AUTH_LIFETIME = 490000; // 8 minutes 10 seconds
+    const AUTH_LIFETIME = 290000; // 4 minutes 50 seconds
 
     // Function to force refresh portal and NMS sessions
 
@@ -3548,64 +3548,86 @@ client.on('ready', async () => {
         console.log('Bot is fully operational.');
 
         // Function for the daily scheduled subscriber report task
-
         const scheduledTask = async () => {
             try {
                 const count = await getSubscriberCount();
                 const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
                 const targetIds = ['916200493605@c.us']; // '917004501523@c.us', 
+                
                 let csvMedia = null;
+                let filePathForCleanup = null;
+
+                // --- 1. Download the report with multiple retries ---
                 try {
-                    const cookies = sessionCache;
-                    const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
-                    const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
-                        headers: {
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'Cookie': cookieString,
-                            'Sec-Fetch-Dest': 'document',
-                        },
-                        responseType: 'arraybuffer'
-                    });
-                    if (response.status !== 200) { throw new Error(`Server responded with status ${response.status}`); }
-                    const csvBuffer = response.data;
-                    const today = new Date();
-                    const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
-                    const filePath = path.join(__dirname, fileName);
-                    fs.writeFileSync(filePath, csvBuffer);
-                    csvMedia = MessageMedia.fromFilePath(filePath);
-                    console.log('CSV downloaded and prepared for distribution');
-                } catch (error) {
-                    console.error('Error downloading CSV after retries:', error.message);
-                }
-                for (const id of targetIds) {
-                    try {
-                        const chat = await client.getChatById(id);
-                        await chat.sendMessage(message);
-                        if (csvMedia) {
-                            await chat.sendMessage(csvMedia, { caption: 'Daily Subscriber Report' });
-                            console.log('Successfully shared in WhatsApp Report!');
-                        } else {
-                            await chat.sendMessage('Failed to download the daily subscriber report.');
-                            console.log('Failed to share Whatsapp Report!');
+                    console.log('[Report Task] Attempting to download daily subscriber report...');
+                    const reportData = await retryOperation(async () => {
+                        const cookies = sessionCache;
+                        if (!cookies) throw new Error("No session available for report download.");
+
+                        const cookieString = `${cookies.railwireCookie.name}=${cookies.railwireCookie.value}; ${cookies.ciSessionCookie.name}=${cookies.ciSessionCookie.value}`;
+                        const response = await axios.get('https://jh.railwire.co.in/billcntl/report/csv', {
+                            headers: {
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                                'Accept-Encoding': 'gzip, deflate, br',
+                                'Cookie': cookieString,
+                                'Sec-Fetch-Dest': 'document',
+                            },
+                            timeout: 40000, // 40-second timeout for the request
+                            responseType: 'arraybuffer'
+                        });
+
+                        if (response.status !== 200) {
+                            throw new Error(`Server responded with status ${response.status}`);
                         }
-                    } catch (err) {
-                        console.error(`Failed to send report to ID ${id}:`, err.message);
-                    }
-                }
-                if (csvMedia) {
-                    try {
+                        const csvBuffer = response.data;
                         const today = new Date();
                         const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
                         const filePath = path.join(__dirname, fileName);
-                        fs.unlinkSync(filePath);
-                        console.log('Temporary CSV file cleaned up');
+                        fs.writeFileSync(filePath, csvBuffer);
+                        
+                        // Return both media and path for cleanup
+                        return { media: MessageMedia.fromFilePath(filePath), path: filePath };
+                    }, 5, 6000); // 3 total attempts, with a 5-second delay between failures
+
+                    csvMedia = reportData.media;
+                    filePathForCleanup = reportData.path;
+                    console.log('[Report Task] CSV downloaded and prepared for distribution.');
+
+                } catch (error) {
+                    console.error('[Report Task] CRITICAL: Failed to download CSV after multiple retries:', error.message);
+                    // csvMedia will remain null, and the sending loop will notify users of the failure.
+                }
+
+                // --- 2. Send the report to each target with multiple retries ---
+                for (const id of targetIds) {
+                    try {
+                        console.log(`[Report Task] Attempting to send report to ${id}...`);
+                        await retryOperation(async () => {
+                            const chat = await client.getChatById(id);
+                            await chat.sendMessage(message);
+                            if (csvMedia) {
+                                await chat.sendMessage(csvMedia, { caption: 'Daily Subscriber Report' });
+                            } else {
+                                await chat.sendMessage('Sorry, the daily subscriber report could not be downloaded today due to a server issue.');
+                            }
+                        }, 3, 2000); // 3 total attempts, with a 2-second delay
+                        console.log(`[Report Task] Successfully sent report to ID ${id}.`);
+                    } catch (err) {
+                        console.error(`[Report Task] CRITICAL: Failed to send report to ID ${id} after multiple retries:`, err.message);
+                    }
+                }
+
+                // --- 3. Clean up the temporary file ---
+                if (filePathForCleanup) {
+                    try {
+                        fs.unlinkSync(filePathForCleanup);
+                        console.log('[Report Task] Temporary CSV file cleaned up.');
                     } catch (cleanupError) {
-                        console.error('Error cleaning up CSV file:', cleanupError.message);
+                        console.error('[Report Task] Error cleaning up CSV file:', cleanupError.message);
                     }
                 }
             } catch (error) {
-                console.error('Scheduled daily task failed:', error.message);
+                console.error('[Report Task] The scheduled daily task encountered a critical unhandled error:', error.message);
             }
         };
 
@@ -3622,7 +3644,7 @@ client.on('ready', async () => {
         cron.schedule('0 12 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
-        cron.schedule('21 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+        cron.schedule('38 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
@@ -3661,5 +3683,3 @@ client.on('message', (message) => {
 
 
 client.initialize();
-
-
