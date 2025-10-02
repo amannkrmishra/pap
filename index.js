@@ -235,7 +235,7 @@ const waitForReply = async (originalMessage) => {
 
 // -- Generic utility to process an array of items in smaller concurrent batches --
 
-const processInBatches = async (items, asyncFn, batchSize = 15) => {
+const processInBatches = async (items, asyncFn, batchSize = 50) => {
     let results = [];
     for (let i = 0; i < items.length; i += batchSize) {
         const batchItems = items.slice(i, i + batchSize);
@@ -663,7 +663,7 @@ const authenticate = async (username, password) => {
 
 // -- Generic utility function to retry an asynchronous operation multiple times on failure --
 
-async function retryOperation(operation, maxRetries = 5, delay = 1000) { 
+async function retryOperation(operation, maxRetries = 5, delay = 500) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             return await operation();
@@ -1968,7 +1968,7 @@ const runAnpStatusCheckAndNotify = async (triggeredBy = 'cron') => {
             return { ...partner, live_subs: liveCount };
         };
         
-        const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus);
+        const partnerResults = await processInBatches(partnersToCheck, checkPartnerStatus, 100);
 
         const extraDetails = partnerLiveDetailsCache;
         const currentProblemPartners = new Map();
@@ -2544,13 +2544,11 @@ const extractUsernamesFromImage = async (message) => {
             .toBuffer();
 
         const { data: { text } } = await Tesseract.recognize( processedImageBuffer, 'eng' );
-        console.log(`[OCR] Raw extracted text: "${text.replace(/\n/g, ' ')}"`);
 
         const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
         let matches = text.match(subscriberIdPattern) || [];
 
         if (matches.length > 0) {
-            console.log(`Found Subscriber ID(s): ${matches.join(', ')}`);
             return [...new Set(matches)];
         }
 
@@ -2558,7 +2556,6 @@ const extractUsernamesFromImage = async (message) => {
         matches = text.match(usernamePattern) || [];
 
         if (matches.length > 0) {
-            console.log(`Found Username(s): ${matches.join(', ')}`);
         }
 
         return [...new Set(matches.map(m => m.toLowerCase()))];
@@ -3659,6 +3656,5 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
-
 
 client.initialize();
