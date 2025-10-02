@@ -3622,7 +3622,7 @@ client.on('ready', async () => {
         cron.schedule('0 12 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
-        cron.schedule('15 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+        cron.schedule('21 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
@@ -3661,4 +3661,5 @@ client.on('message', (message) => {
 
 
 client.initialize();
+
 
