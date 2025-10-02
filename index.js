@@ -3512,25 +3512,85 @@ client.on('ready', async () => {
     botStartTime = Date.now();
 
     // --- 2. Define Authentication Refresh Logic ---
-    const AUTH_LIFETIME = 282000; // 4 minutes 42 seconds
+    const COOKIE_REFRESH_INTERVAL = 540000; // 9 minutes (before 10-min expiry)
 
+    // Function to refresh cookies by making an authenticated request
+    const refreshCookies = async () => {
+        try {
+            if (!sessionCache) {
+                console.log('[REFRESH] No session exists, performing full authentication...');
+                await performFullAuthentication();
+                return;
+            }
 
-    // Function to force refresh portal and NMS sessions
+            const cookieString = `${sessionCache.railwireCookie.name}=${sessionCache.railwireCookie.value}; ${sessionCache.ciSessionCookie.name}=${sessionCache.ciSessionCookie.value}`;
+            
+            const response = await axios.get(`${baseURL}/billcntl`, {
+                headers: { 'Cookie': cookieString },
+                timeout: 10000,
+                validateStatus: (status) => status < 500 // Accept redirects and client errors
+            });
 
-    const forceRefreshSession = async () => {
+            // Check if we got redirected to login (session expired)
+            if (response.request.path && response.request.path.includes('rlogin')) {
+                console.log('[REFRESH] Session expired, performing full authentication...');
+                await performFullAuthentication();
+                return;
+            }
+
+            // Extract refreshed cookies from response
+            const setCookieHeader = response.headers['set-cookie'];
+            if (setCookieHeader && setCookieHeader.length > 0) {
+                let refreshedCount = 0;
+                setCookieHeader.forEach(cookieString => {
+                    // Ignore deleted cookies
+                    if (cookieString.includes('deleted') || cookieString.includes('expires=Thu, 01-Jan-1970')) {
+                        return;
+                    }
+                    
+                    if (cookieString.startsWith('railwire_cookie_name=')) {
+                        const value = cookieString.split(';')[0].split('=')[1];
+                        sessionCache.railwireCookie.value = value;
+                        refreshedCount++;
+                    } else if (cookieString.startsWith('ci_session=')) {
+                        const value = cookieString.split(';')[0].split('=')[1];
+                        sessionCache.ciSessionCookie.value = value;
+                        refreshedCount++;
+                    }
+                });
+                
+                if (refreshedCount > 0) {
+                    console.log(`[REFRESH] Successfully refreshed ${refreshedCount} cookie(s) via lightweight request.`);
+                } else {
+                    console.log('[REFRESH] No fresh cookies received, performing full authentication...');
+                    await performFullAuthentication();
+                }
+            } else {
+                console.log('[REFRESH] No Set-Cookie headers, performing full authentication...');
+                await performFullAuthentication();
+            }
+
+        } catch (err) {
+            console.error('[REFRESH] Cookie refresh failed, attempting full authentication:', err.message);
+            await performFullAuthentication();
+        }
+    };
+
+    // Function to perform full authentication (CAPTCHA + login)
+    const performFullAuthentication = async () => {
         try {
             const freshPortalSession = await authenticate('admin', 'Pass@123');
             const freshNmsCookie = await getNmsSessionFromPortal(freshPortalSession);
             sessionCache = freshPortalSession;
             nmsSessionCache = freshNmsCookie;
-            console.log('Bot is healthy.');
+            console.log('[AUTH] Full authentication completed successfully.');
         } catch (err) {
-            console.error('[TIMER] FAILURE: Proactive session refresh failed:', err.message);
+            console.error('[AUTH] CRITICAL: Full authentication failed:', err.message);
             sessionCache = null;
             nmsSessionCache = null;
             const recoveryDelay = 15000; // 15 seconds
-            console.error(`Scheduling recovery attempt in ${recoveryDelay / 1000} seconds.`);
-            setTimeout(forceRefreshSession, recoveryDelay);
+            console.error(`[AUTH] Scheduling recovery attempt in ${recoveryDelay / 1000} seconds.`);
+            setTimeout(performFullAuthentication, recoveryDelay);
             throw err;
         }
     };
@@ -3539,7 +3599,7 @@ client.on('ready', async () => {
     const initialDelay = 3000; // 3 seconds
     try {
         await new Promise(resolve => setTimeout(resolve, initialDelay));
-        await forceRefreshSession();
+        await performFullAuthentication(); // <-- Use the new function here
         console.log('Bot is fully operational.');
 
         // Function for the daily scheduled subscriber report task
@@ -3612,10 +3672,10 @@ client.on('ready', async () => {
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
         // Daily subscription expiry notifier (runs once at 9:05 AM)
-        cron.schedule('18 13 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        cron.schedule('5 9 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // ANP count check (every 2 hours, offset)
-        cron.schedule('3 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
+        cron.schedule('3 9-23/2 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/KKolkata" });
 
         // Final ANP count check for the day
         cron.schedule('50 23 * * *', () => checkAnpCountsAndNotify(), { timezone: "Asia/Kolkata" });
@@ -3624,7 +3684,7 @@ client.on('ready', async () => {
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
-        setInterval(forceRefreshSession, AUTH_LIFETIME);
+        setInterval(refreshCookies, COOKIE_REFRESH_INTERVAL); // <-- Add the new interval here
 
         console.log('WhatsApp bot ready to use!!');
 
@@ -3656,6 +3716,5 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
-
 
 client.initialize();
