@@ -1800,12 +1800,12 @@ const runDailySubscriptionNotifier = async () => {
                 // Improved message for expired users
                 let subscriberMsg = "";
                 subscriberMsg += `⚠️ Dear Customer,\n\n`;
-                subscriberMsg += `Your Railwire account (${user.Username}) has *expired*.\n\n`;
+                subscriberMsg += `Your Railwire recharge for (${user.Username}) has *expired*.\n\n`;
                 subscriberMsg += `Recharge *today* to instantly restore your high-speed internet and avoid inconvenience.\n`;
                 subscriberMsg += `👉 Don’t miss out – stay connected with Railwire.`;
 
-                // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
-                // await new Promise(resolve => setTimeout(resolve, 500));
+                 await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+                 await new Promise(resolve => setTimeout(resolve, 500));
 
                 const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
@@ -1826,12 +1826,12 @@ const runDailySubscriptionNotifier = async () => {
                 // Improved message for expiring tomorrow
                 let subscriberMsg = "";
                 subscriberMsg += `⏳ Dear Customer,\n\n`;
-                subscriberMsg += `Your Railwire account (${user.Username}) will *expire today*.\n\n`;
+                subscriberMsg += `Your Railwire recharge for (${user.Username}) will *expire today*.\n\n`;
                 subscriberMsg += `Recharge *before midnight* to ensure *uninterrupted internet service*.\n`;
                 subscriberMsg += `Stay connected with Railwire – recharge now!`;
 
-                // await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
-                // await new Promise(resolve => setTimeout(resolve, 500));
+                 await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+                 await new Promise(resolve => setTimeout(resolve, 500));
 
                 const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
@@ -1869,8 +1869,8 @@ const runDailySubscriptionNotifier = async () => {
             partnerMsg += `*Marketing Support*\n${marketingName}\n${marketingNumber}\n\n`;
             partnerMsg += `*For Technical Support*\nAman Kumar Mishra\n+918294745758`;
 
-            await sendMessageToNumber(partnerContact, partnerMsg);
-            await new Promise(resolve => setTimeout(resolve, 500)); // Delay between sending to different partners
+        //    await sendMessageToNumber(partnerContact, partnerMsg);
+        //    await new Promise(resolve => setTimeout(resolve, 500)); // Delay between sending to different partners
         }
 
     } catch (error) {
@@ -3641,7 +3641,7 @@ client.on('ready', async () => {
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
         // Daily subscription expiry notifier (runs once at 12:00 PM)
-        cron.schedule('0 12 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        cron.schedule('22 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
         cron.schedule('38 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
@@ -3683,3 +3683,4 @@ client.on('message', (message) => {
 
 
 client.initialize();
+
