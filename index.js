@@ -3734,7 +3734,7 @@ client.on('ready', async () => {
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
         // Daily subscription expiry notifier (runs once at 03:00 PM)
-        cron.schedule('0 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        cron.schedule('25 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
@@ -3772,5 +3772,6 @@ client.on('message', (message) => {
 });
 
 // -- Starts the WhatsApp client connection process --
+
 
 client.initialize();
