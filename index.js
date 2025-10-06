@@ -3552,11 +3552,11 @@ client.on('ready', async () => {
             try {
                 const count = await getSubscriberCount();
                 const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
-                const targetIds = ['916200493605@c.us']; // '917004501523@c.us', 
+                const targetIds = ['917004501523@c.us', '916200493605@c.us'];
                 
                 let csvMedia = null;
                 let filePathForCleanup = null;
-
+                
                 // --- 1. Download the report with multiple retries ---
                 try {
                     console.log('[Report Task] Attempting to download daily subscriber report...');
@@ -3640,11 +3640,11 @@ client.on('ready', async () => {
         // Ticket monitoring (every 30 mins)
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
-        // Daily subscription expiry notifier (runs once at 12:00 PM)
-        cron.schedule('22 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+        // Daily subscription expiry notifier (runs once at 03:00 PM)
+        cron.schedule('0 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
-        cron.schedule('38 0 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+        cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
@@ -3683,4 +3683,5 @@ client.on('message', (message) => {
 
 
 client.initialize();
+
 
