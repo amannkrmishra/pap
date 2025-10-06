@@ -48,6 +48,7 @@ const PROCESSED_TICKETS_STATE_FILE_PATH = path.join(__dirname, 'processedTickets
 const ANP_STATE_FILE_PATH = path.join(__dirname, 'anpDownState.json');
 const ANP_REPORT_STATE_FILE_PATH = path.join(__dirname, 'anpReportState.json');
 const ANP_COUNTS_STATE_FILE_PATH = path.join(__dirname, 'anpCounts.json');
+const NOTIFIER_STATE_FILE_PATH = path.join(__dirname, 'notifierState.json');
 const PackageNameToFilterOut = "FUP10Mbps-1Mbps 30GB";
 
 // --- Configuration & Constants ---
@@ -527,6 +528,47 @@ const saveAnpCountsState = (data) => {
     } catch (error) {
         console.error('Error saving ANP counts state:', error.message);
     }
+};
+
+// -- Loads the notifier state from JSON file --
+const loadNotifierState = () => {
+    try {
+        if (fs.existsSync(NOTIFIER_STATE_FILE_PATH)) {
+            const data = fs.readFileSync(NOTIFIER_STATE_FILE_PATH, 'utf8');
+            return JSON.parse(data);
+        }
+    } catch (error) {
+        console.error('Error loading notifier state:', error.message);
+    }
+    return { active: {}, inactive: {} };
+};
+
+// -- Saves the notifier state to JSON file --
+const saveNotifierState = (state) => {
+    try {
+        fs.writeFileSync(NOTIFIER_STATE_FILE_PATH, JSON.stringify(state, null, 2), 'utf8');
+    } catch (error) {
+        console.error('Error saving notifier state:', error.message);
+    }
+};
+
+// -- Cleans old entries from notifier state (older than current month) --
+const cleanNotifierState = (state) => {
+    const currentMonth = new Date().getMonth();
+    const currentYear = new Date().getFullYear();
+    
+    const cleaned = { active: {}, inactive: {} };
+    
+    ['active', 'inactive'].forEach(type => {
+        Object.entries(state[type] || {}).forEach(([key, timestamp]) => {
+            const notifiedDate = new Date(timestamp);
+            if (notifiedDate.getMonth() === currentMonth && notifiedDate.getFullYear() === currentYear) {
+                cleaned[type][key] = timestamp;
+            }
+        });
+    });
+    
+    return cleaned;
 };
 
 /* ----------------------------------------------------------------
@@ -1778,8 +1820,13 @@ const runDailySubscriptionNotifier = async () => {
         return;
     }
 
+    // Load and clean notification state
+    let notifierState = loadNotifierState();
+    notifierState = cleanNotifierState(notifierState);
+
     const formatDate = (date) => date.toISOString().split('T')[0];
     const today = new Date();
+    const currentTimestamp = Date.now();
     
     const threeDaysAgo = new Date();
     threeDaysAgo.setDate(today.getDate() - 3);
@@ -1789,6 +1836,8 @@ const runDailySubscriptionNotifier = async () => {
     const partnerNotificationsMap = new Map();
     let totalInactive = 0;
     let totalActive = 0;
+    let skippedActive = 0;
+    let skippedInactive = 0;
 
     try {
         // --- Step 1: Process INACTIVE users and collect data ---
@@ -1797,15 +1846,34 @@ const runDailySubscriptionNotifier = async () => {
 
         for (const user of inactiveUsers) {
             if (ANP_CONFIG.AMAN_DISTRICTS.has(user['District'])) {
-                // Improved message for expired users
-                let subscriberMsg = "";
-                subscriberMsg += `⚠️ Dear Customer,\n\n`;
-                subscriberMsg += `Your Railwire recharge for (${user.Username}) has *expired*.\n\n`;
-                subscriberMsg += `Recharge *today* to instantly restore your high-speed internet and avoid inconvenience.\n`;
-                subscriberMsg += `👉 Don’t miss out – stay connected with Railwire.`;
+                const notificationKey = `${user.Username}_${user['Mobile Number']}`;
+                
+                // Check if already notified this month
+                if (notifierState.inactive[notificationKey]) {
+                    skippedInactive++;
+                    continue;
+                }
 
-                 await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
-                 await new Promise(resolve => setTimeout(resolve, 500));
+                let subscriberMsg = "";
+                subscriberMsg += `⚠️ Dear Subscriber,\n\n`;
+                subscriberMsg += `Your Railwire recharge for (${user.Username}) has *expired*.\n\n`;
+                subscriberMsg += `Recharge *today* to instantly restore your high-speed internet.\n\n`;
+
+                subscriberMsg += `🔌 *How to Recharge:*\n\n`;
+                subscriberMsg += `1️⃣ Download the RailWire App 👉 https://bit.ly/railwireapp\n`;
+                subscriberMsg += `2️⃣ Open the app & tap *Sign In*\n`;
+                subscriberMsg += `👤 Username: (shared in msg)\n`;
+                subscriberMsg += `🔐 Password: *YourFirstName123* (e.g., Raj123)\n\n`;
+                subscriberMsg += `3️⃣ Go to *Recharge* > Select Payment Method\n`;
+                subscriberMsg += `💸 Select pay using UPI app\n`;
+                subscriberMsg += `📧 Enter your Email ID (if asked)\n\n`;
+                subscriberMsg += `✅ After payment, *open RailWire App again* to activate.\n`;
+
+                await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                // Mark as notified
+                notifierState.inactive[notificationKey] = currentTimestamp;
 
                 const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
@@ -1823,15 +1891,35 @@ const runDailySubscriptionNotifier = async () => {
 
         for (const user of activeUsers) {
             if (ANP_CONFIG.AMAN_DISTRICTS.has(user['District'])) {
+                const notificationKey = `${user.Username}_${user['Mobile Number']}`;
+                
+                // Check if already notified this month
+                if (notifierState.active[notificationKey]) {
+                    skippedActive++;
+                    continue;
+                }
+
                 // Improved message for expiring tomorrow
                 let subscriberMsg = "";
-                subscriberMsg += `⏳ Dear Customer,\n\n`;
+                subscriberMsg += `⚠️ Dear Subscriber,\n\n`;
                 subscriberMsg += `Your Railwire recharge for (${user.Username}) will *expire today*.\n\n`;
                 subscriberMsg += `Recharge *before midnight* to ensure *uninterrupted internet service*.\n`;
-                subscriberMsg += `Stay connected with Railwire – recharge now!`;
 
-                 await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
-                 await new Promise(resolve => setTimeout(resolve, 500));
+                subscriberMsg += `🔌 *How to Recharge:*\n\n`;
+                subscriberMsg += `1️⃣ Download the RailWire App 👉 https://bit.ly/railwireapp\n`;
+                subscriberMsg += `2️⃣ Open the app & tap *Sign In*\n`;
+                subscriberMsg += `👤 Username: (shared in msg)\n`;
+                subscriberMsg += `🔐 Password: *YourFirstName123* (e.g., Raj123)\n\n`;
+                subscriberMsg += `3️⃣ Go to *Recharge* > Select Payment Method\n`;
+                subscriberMsg += `💸 Select pay using UPI app\n`;
+                subscriberMsg += `📧 Enter your Email ID (if asked)\n\n`;
+                subscriberMsg += `✅ After payment, *open RailWire App again* to activate.\n`;
+
+                await sendMessageToNumber(user['Mobile Number'], subscriberMsg);
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                // Mark as notified
+                notifierState.active[notificationKey] = currentTimestamp;
 
                 const partnerContact = user['ANP Contact No'] ? String(user['ANP Contact No']).trim() : null;
                 if (partnerContact) {
@@ -1842,6 +1930,9 @@ const runDailySubscriptionNotifier = async () => {
                 }
             }
         }
+
+        // Save updated state
+        saveNotifierState(notifierState);
 
         // --- Step 3: Build and send the single, combined message to each partner ---
         for (const [partnerContact, data] of partnerNotificationsMap.entries()) {
@@ -1865,12 +1956,12 @@ const runDailySubscriptionNotifier = async () => {
                 partnerMsg += `\n\n`;
             }
 
-            partnerMsg += `*For any help contact:*\n\n`;
+            partnerMsg += `*➕ For any help contact:*\n\n`;
             partnerMsg += `*Marketing Support*\n${marketingName}\n${marketingNumber}\n\n`;
             partnerMsg += `*For Technical Support*\nAman Kumar Mishra\n+918294745758`;
 
-        //    await sendMessageToNumber(partnerContact, partnerMsg);
-        //    await new Promise(resolve => setTimeout(resolve, 500)); // Delay between sending to different partners
+            await sendMessageToNumber(partnerContact, partnerMsg);
+            await new Promise(resolve => setTimeout(resolve, 500));
         }
 
     } catch (error) {
@@ -1878,12 +1969,10 @@ const runDailySubscriptionNotifier = async () => {
     }
 
     // --- Step 4: Final Summary Log ---
-    let summary = `[DAILY NOTIFIER] Job finished.`;
+    let summary = `[DAILY NOTIFIER] Job finished. Total: ${totalActive + totalInactive} | Sent: ${totalActive + totalInactive - skippedActive - skippedInactive} | Skipped: ${skippedActive + skippedInactive}`;
     if (partnerNotificationsMap.size > 0) {
         const partnerNames = Array.from(partnerNotificationsMap.values()).map(data => data.name);
-        summary += ` | Combined alerts sent to ${partnerNotificationsMap.size} partners: ${partnerNames.join(', ')}`;
-    } else {
-        summary += ` | No expiry notifications sent.`;
+        summary += ` | Alerts to ${partnerNotificationsMap.size} partners: ${partnerNames.join(', ')}`;
     }
     console.log(summary);
 };
@@ -3634,6 +3723,10 @@ client.on('ready', async () => {
         // Housekeeping at midnight
         cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); } catch (e) {} }, { timezone: "Asia/Kolkata" });
 
+        // Housekeeping at midnight (Notifier clear)
+        cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); if (new Date().getDate() === 1) { fs.unlinkSync(NOTIFIER_STATE_FILE_PATH); console.log('[Housekeeping] Monthly notifier state reset completed.'); } } catch (e) {} }, { timezone: "Asia/Kolkata" });
+
+
         // High-frequency ANP status check (every 9 mins)
         cron.schedule('*/6 * * * *', runAnpStatusCheckAndNotify, { timezone: "Asia/Kolkata" });
 
@@ -3680,8 +3773,4 @@ client.on('message', (message) => {
 
 // -- Starts the WhatsApp client connection process --
 
-
-
 client.initialize();
-
-
