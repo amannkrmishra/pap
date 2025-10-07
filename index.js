@@ -3638,18 +3638,24 @@ client.on('ready', async () => {
 
         // Function for the daily scheduled subscriber report task
         const scheduledTask = async () => {
+            let filePathForCleanup = null;
             try {
+                console.log('[Report Task] Starting daily report task...');
+                
+                // Ensure we have a valid session before starting
+                if (!sessionCache) {
+                    console.error('[Report Task] No valid session available. Attempting to refresh...');
+                    await forceRefreshSession();
+                }
+                
                 const count = await getSubscriberCount();
                 const message = `*Time:* ${new Date().toLocaleTimeString('en-US')}\n*Active Subscriber:* *${count || 'N/A'}*\n\nFinal count and report for the day.`;
-                const targetIds = ['917004501523@c.us', '916200493605@c.us'];
-                
-                let csvMedia = null;
-                let filePathForCleanup = null;
+                const targetIds = ['916200493605@c.us']; // '917004501523@c.us', 
                 
                 // --- 1. Download the report with multiple retries ---
                 try {
                     console.log('[Report Task] Attempting to download daily subscriber report...');
-                    const reportData = await retryOperation(async () => {
+                    filePathForCleanup = await retryOperation(async () => {
                         const cookies = sessionCache;
                         if (!cookies) throw new Error("No session available for report download.");
 
@@ -3661,30 +3667,41 @@ client.on('ready', async () => {
                                 'Cookie': cookieString,
                                 'Sec-Fetch-Dest': 'document',
                             },
-                            timeout: 40000, // 40-second timeout for the request
+                            timeout: 40000,
                             responseType: 'arraybuffer'
                         });
 
                         if (response.status !== 200) {
                             throw new Error(`Server responded with status ${response.status}`);
                         }
+                        
                         const csvBuffer = response.data;
+                        
+                        // Verify we actually got CSV data
+                        if (!csvBuffer || csvBuffer.length === 0) {
+                            throw new Error('Received empty CSV buffer from server');
+                        }
+                        
                         const today = new Date();
                         const fileName = `Subscriber_Report_${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}.csv`;
                         const filePath = path.join(__dirname, fileName);
-                        fs.writeFileSync(filePath, csvBuffer);
                         
-                        // Return both media and path for cleanup
-                        return { media: MessageMedia.fromFilePath(filePath), path: filePath };
-                    }, 5, 6000); // 3 total attempts, with a 5-second delay between failures
+                        fs.writeFileSync(filePath, csvBuffer);
+                        console.log(`[Report Task] CSV saved to: ${filePath} (Size: ${csvBuffer.length} bytes)`);
+                        
+                        // Verify file was written successfully
+                        if (!fs.existsSync(filePath)) {
+                            throw new Error('CSV file was not written successfully');
+                        }
+                        
+                        return filePath;
+                    }, 5, 6000);
 
-                    csvMedia = reportData.media;
-                    filePathForCleanup = reportData.path;
-                    console.log('[Report Task] CSV downloaded and prepared for distribution.');
+                    console.log('[Report Task] CSV downloaded successfully at:', filePathForCleanup);
 
                 } catch (error) {
                     console.error('[Report Task] CRITICAL: Failed to download CSV after multiple retries:', error.message);
-                    // csvMedia will remain null, and the sending loop will notify users of the failure.
+                    filePathForCleanup = null;
                 }
 
                 // --- 2. Send the report to each target with multiple retries ---
@@ -3694,29 +3711,51 @@ client.on('ready', async () => {
                         await retryOperation(async () => {
                             const chat = await client.getChatById(id);
                             await chat.sendMessage(message);
-                            if (csvMedia) {
-                                await chat.sendMessage(csvMedia, { caption: 'Daily Subscriber Report' });
+                            
+                            if (filePathForCleanup && fs.existsSync(filePathForCleanup)) {
+                                console.log(`[Report Task] Creating media from file for ${id}...`);
+                                const freshMedia = MessageMedia.fromFilePath(filePathForCleanup);
+                                console.log(`[Report Task] Sending CSV to ${id}...`);
+                                await chat.sendMessage(freshMedia, { caption: 'Daily Subscriber Report' });
+                                console.log(`[Report Task] CSV sent successfully to ${id}`);
                             } else {
+                                console.warn(`[Report Task] No valid CSV file to send to ${id}`);
                                 await chat.sendMessage('Sorry, the daily subscriber report could not be downloaded today due to a server issue.');
                             }
-                        }, 3, 2000); // 3 total attempts, with a 2-second delay
-                        console.log(`[Report Task] Successfully sent report to ID ${id}.`);
+                        }, 3, 3000);
+                        console.log(`[Report Task] Successfully completed sending to ${id}.`);
                     } catch (err) {
-                        console.error(`[Report Task] CRITICAL: Failed to send report to ID ${id} after multiple retries:`, err.message);
+                        console.error(`[Report Task] CRITICAL: Failed to send report to ${id} after multiple retries:`, err.message);
                     }
+                    
+                    // Add a small delay between recipients to avoid rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
 
                 // --- 3. Clean up the temporary file ---
-                if (filePathForCleanup) {
+                if (filePathForCleanup && fs.existsSync(filePathForCleanup)) {
                     try {
                         fs.unlinkSync(filePathForCleanup);
-                        console.log('[Report Task] Temporary CSV file cleaned up.');
+                        console.log('[Report Task] Temporary CSV file cleaned up successfully.');
                     } catch (cleanupError) {
                         console.error('[Report Task] Error cleaning up CSV file:', cleanupError.message);
                     }
                 }
+                
+                console.log('[Report Task] Daily report task completed successfully.');
             } catch (error) {
                 console.error('[Report Task] The scheduled daily task encountered a critical unhandled error:', error.message);
+                console.error('[Report Task] Error stack:', error.stack);
+            } finally {
+                // Ensure cleanup happens even if there's an error
+                if (filePathForCleanup && fs.existsSync(filePathForCleanup)) {
+                    try {
+                        fs.unlinkSync(filePathForCleanup);
+                        console.log('[Report Task] Cleanup performed in finally block.');
+                    } catch (e) {
+                        console.error('[Report Task] Cleanup in finally block failed:', e.message);
+                    }
+                }
             }
         };
 
@@ -3737,7 +3776,7 @@ client.on('ready', async () => {
         cron.schedule('25 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
-        cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
+        cron.schedule('45 21 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
 
         // Finally, start the main proactive refresh timer for subsequent runs
         setInterval(forceRefreshSession, AUTH_LIFETIME);
