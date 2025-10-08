@@ -3389,6 +3389,33 @@ const processActions = async (message, userIdentifier, wantsSessionReset, wantsP
 
 const handleIncomingMessage = async (message) => {
     try {
+        const lowerCaseBody = message.body.toLowerCase();
+        const portalConfigs = {
+            'jh': { url: 'https://jh.railwire.co.in', user: 'admin', pass: 'Pass@123' },
+            'ch': { url: 'https://ch.railwire.co.in', user: 'admin', pass: 'Light$2024' },
+            'od': { url: 'https://od.railwire.co.in', user: 'admin', pass: 'Google2025$' }
+        };
+
+        const usernameRegex = /\b((?:jh|ch|od)\.[\w.-]+)\b/gi;
+        const foundUsernames = lowerCaseBody.match(usernameRegex);
+        
+        let targetPortalKey = 'jh'; // Default to Jharkhand
+        if (foundUsernames && foundUsernames.length > 0) {
+            const portalPart = foundUsernames[0].split('.')[0];
+            if (portalConfigs[portalPart]) {
+                targetPortalKey = portalPart;
+            }
+        }
+
+        if (baseURL !== portalConfigs[targetPortalKey].url) {
+            baseURL = portalConfigs[targetPortalKey].url;
+            mainURL = `${baseURL}/billcntl/kycpending`;
+            console.log(`Context switched to ${targetPortalKey.toUpperCase()} based on username in message.`);
+            
+            const config = portalConfigs[targetPortalKey];
+            sessionCache = await authenticate(config.user, config.pass);
+            nmsSessionCache = await getNmsSessionFromPortal(sessionCache);
+        }
         const chat = await message.getChat();
         const ignoredGroupNames = ['Railtel & MSP team Jharkhand', 'Railwire-Jharkhand-Tech'];
         if (chat.isGroup && ignoredGroupNames.includes(chat.name)) {
@@ -3397,7 +3424,7 @@ const handleIncomingMessage = async (message) => {
 
         const userIdentifier = getUserIdentifier(message);
         const rawBody = message.body; 
-        const lowerCaseBody = rawBody.toLowerCase();
+        
 
         console.log(`User Detail: ${userIdentifier}`);
         console.log(`Message: ${rawBody}`);
@@ -3414,7 +3441,7 @@ const handleIncomingMessage = async (message) => {
         const SESSION_TIMEOUT_MS = 300000;
         const EXECUTION_DELAY_MS = 1300;
 
-        const codePattern = /(?<!\/)\b(jh(\.[\w-]+)+)\b/gi;
+        const codePattern = /\b((?:jh|ch|od)\.[\w.-]+)\b/gi;
         const subscriberIdPattern = /(?<!\d)\b\d{5}\b(?!\d)/g;
 
         const codesFromText = (rawBody.match(codePattern) || []).concat(rawBody.match(subscriberIdPattern) || []);
