@@ -3790,7 +3790,7 @@ client.on('ready', async () => {
         cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); } catch (e) {} }, { timezone: "Asia/Kolkata" });
 
         // Housekeeping at midnight (Notifier clear)
-        cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); if (new Date().getDate() === 1) { fs.unlinkSync(NOTIFIER_STATE_FILE_PATH); console.log('[Housekeeping] Monthly notifier state reset completed.'); } } catch (e) {} }, { timezone: "Asia/Kolkata" });
+  //      cron.schedule('0 0 * * *', () => { try { fs.unlinkSync(ANP_COUNTS_STATE_FILE_PATH); if (new Date().getDate() === 1) { fs.unlinkSync(NOTIFIER_STATE_FILE_PATH); console.log('[Housekeeping] Monthly notifier state reset completed.'); } } catch (e) {} }, { timezone: "Asia/Kolkata" });
 
 
         // High-frequency ANP status check (every 9 mins)
@@ -3800,7 +3800,7 @@ client.on('ready', async () => {
         cron.schedule(TICKET_MONITOR_CONFIG.CRON_SCHEDULE, monitorAndAlertTickets, { timezone: "Asia/Kolkata" });
 
         // Daily subscription expiry notifier (runs once at 03:00 PM)
-        cron.schedule('25 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
+    //    cron.schedule('25 15 * * *', runDailySubscriptionNotifier, { timezone: "Asia/Kolkata" });
 
         // Daily subscriber report and CSV download
         cron.schedule('59 23 * * *', scheduledTask, { timezone: "Asia/Kolkata" });
@@ -3841,4 +3841,5 @@ client.on('message', (message) => {
 
 
 client.initialize();
+
 
